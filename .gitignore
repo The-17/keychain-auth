@@ -30,3 +30,8 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Internal specs and plans (authoritative references, not for public repo)
+SPEC.md
+INTEGRATION_SPEC.md
+IMPLEMENTATION_PLAN.md

@@ -1,0 +1,12 @@
+[Unit]
+Description=keychain-auth daemon for AgentSecrets
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/go/bin/keychain-auth start
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target

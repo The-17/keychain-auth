@@ -34,7 +34,8 @@ builds:
 
 archives:
   - format: tar.gz
-    name_template: "{{ .Binary }}_{{ .Os }}_{{ .Arch }}{{ with .Arm }}v{{ . }}{{ end }}{{ if .Replacements }}{{ index .Replacements .Os }}{{ end }}"
+    # Standard GoReleaser v2 naming template
+    name_template: "{{ .Binary }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}{{ with .Arm }}v{{ . }}{{ end }}"
     files:
       - README.md
       - LICENSE

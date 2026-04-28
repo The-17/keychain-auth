@@ -13,7 +13,9 @@ permissions:
 
 jobs:
   goreleaser:
-    runs-on: ubuntu-latest
+    # Use macOS runner so we have the headers for the Darwin CGO build.
+    # It can also cross-compile the Linux builds since we disabled CGO for Linux.
+    runs-on: macos-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4

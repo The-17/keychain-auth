@@ -16,5 +16,5 @@ func AuditLogPath() string {
 }
 
 func DefaultSocketPath() string {
-    return "/var/run/keychain-auth/agent.sock"
+    return filepath.Join(os.Getenv("HOME"), "Library", "Application Support", "keychain-auth", "agent.sock")
 }

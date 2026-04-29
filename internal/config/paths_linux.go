@@ -24,5 +24,9 @@ func AuditLogPath() string {
 }
 
 func DefaultSocketPath() string {
-    return "/var/run/keychain-auth/agent.sock"
+    runtimeDir := os.Getenv("XDG_RUNTIME_DIR")
+    if runtimeDir == "" {
+        runtimeDir = filepath.Join(os.Getenv("HOME"), ".cache")
+    }
+    return filepath.Join(runtimeDir, "keychain-auth", "agent.sock")
 }

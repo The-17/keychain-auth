@@ -15,9 +15,10 @@ It enforces identity verification and namespace isolation on every secret read.`
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.
-func Execute() {
-    if err := rootCmd.Execute(); err != nil {
-        fmt.Fprintln(os.Stderr, err)
-        os.Exit(1)
-    }
+func Execute(version string) {
+	rootCmd.Version = version
+	if err := rootCmd.Execute(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 }

@@ -1,5 +1,9 @@
-# .goreleaser.yaml
 version: 2
+release:
+  github:
+    owner: The-17
+    name: keychain-auth
+  mode: replace
 
 before:
   hooks:

@@ -36,7 +36,6 @@ CFArrayRef SearchKeychainItems(const char* serviceName) {
 */
 import "C"
 import (
-	"fmt"
 	"unsafe"
 
 	gokeyring "github.com/zalando/go-keyring"

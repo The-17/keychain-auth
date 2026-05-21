@@ -10,7 +10,7 @@ import (
 	"github.com/The-17/keychain-auth/internal/daemon"
 	"github.com/The-17/keychain-auth/internal/handler"
 	"github.com/The-17/keychain-auth/internal/keychain"
-	"github.com/The-17/keychain-auth/internal/session"
+	"github.com/The-17/keychain-auth/internal/pending"
 	"github.com/The-17/keychain-auth/internal/verify"
 )
 
@@ -28,8 +28,9 @@ var startCmd = &cobra.Command{
 			}
 		}
 
-		cfg, err := config.Load(config.ConfigPath())
-		if err != nil {
+		// Fail-fast: validate config is loadable at startup.
+		// The handler re-reads config per connection for live reload.
+		if _, err := config.Load(config.ConfigPath()); err != nil {
 			return err
 		}
 
@@ -39,11 +40,11 @@ var startCmd = &cobra.Command{
 		}
 		defer auditLog.Close()
 
-		sessions := session.NewStore()
+		pendingStore := pending.NewPendingStore(config.PendingPath())
 		verifier := verify.New()
 		kcReader := keychain.New()
 
-		h := handler.New(sessions, verifier, kcReader, auditLog, cfg)
+		h := handler.New(verifier, kcReader, auditLog, pendingStore)
 		d := daemon.New(sockPath, h)
 
 		return d.Run()

@@ -8,7 +8,10 @@ import (
 )
 
 func ConfigPath() string {
-    return filepath.Join(os.Getenv("HOME"), "Library", "Application Support", "keychain-auth", "config.json")
+	if ConfigPathOverride != "" {
+		return ConfigPathOverride
+	}
+	return filepath.Join(os.Getenv("HOME"), "Library", "Application Support", "keychain-auth", "config.json")
 }
 
 func AuditLogPath() string {

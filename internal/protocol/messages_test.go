@@ -1,131 +1,124 @@
 package protocol_test
 
 import (
-    "bytes"
-    "strings"
-    "testing"
+	"bytes"
+	"encoding/json"
+	"strings"
+	"testing"
 
-    "github.com/The-17/keychain-auth/internal/protocol"
+	"github.com/The-17/keychain-auth/internal/protocol"
 )
 
-func TestEncodeDecodeParse(t *testing.T) {
-    var buf bytes.Buffer
-    enc := protocol.NewEncoder(&buf)
-    
-    // Test 1: SessionInit
-    initMsg := protocol.SessionInit{
-        Type:            protocol.TypeSessionInit,
-        PID:             1234,
-        BinaryPath:      "/bin/test",
-        BinaryHash:      "sha256:abc",
-        ProtocolVersion: "1",
-    }
-    if err := enc.Write(initMsg); err != nil {
-        t.Fatalf("Failed to encode: %v", err)
-    }
+func TestEncodeDecodeRequest(t *testing.T) {
+	var buf bytes.Buffer
+	enc := protocol.NewEncoder(&buf)
 
-    // Test 2: SecretRequest
-    reqMsg := protocol.SecretRequest{
-        Type:         protocol.TypeSecretRequest,
-        SessionToken: "token123",
-        ProjectID:    "proj1",
-        Environment:  "development",
-        Key:          "test_key",
-    }
-    if err := enc.Write(reqMsg); err != nil {
-        t.Fatalf("Failed to encode: %v", err)
-    }
+	req := protocol.Request{
+		Type:    protocol.TypeRequest,
+		Action:  protocol.ActionRead,
+		Service: "auth-service",
+		Targets: []string{"db-pass", "api-key"},
+	}
+	if err := enc.Write(req); err != nil {
+		t.Fatalf("Failed to encode request: %v", err)
+	}
 
-    dec := protocol.NewDecoder(&buf)
-    
-    // Read 1
-    raw1, err := dec.ReadRaw()
-    if err != nil {
-        t.Fatalf("Failed to read raw: %v", err)
-    }
-    
-    msgType, parsed1, err := protocol.ParseMessage(raw1)
-    if err != nil {
-        t.Fatalf("Failed to parse: %v", err)
-    }
-    if msgType != protocol.TypeSessionInit {
-        t.Errorf("Expected type %s, got %s", protocol.TypeSessionInit, msgType)
-    }
-    p1 := parsed1.(*protocol.SessionInit)
-    if p1.PID != 1234 || p1.ProtocolVersion != "1" {
-        t.Errorf("Parsed message fields mismatch")
-    }
+	dec := protocol.NewDecoder(&buf)
 
-    // Read 2
-    raw2, err := dec.ReadRaw()
-    if err != nil {
-        t.Fatalf("Failed to read raw: %v", err)
-    }
-    
-    msgType2, parsed2, err := protocol.ParseMessage(raw2)
-    if err != nil {
-        t.Fatalf("Failed to parse: %v", err)
-    }
-    if msgType2 != protocol.TypeSecretRequest {
-        t.Errorf("Expected type %s, got %s", protocol.TypeSecretRequest, msgType2)
-    }
-    p2 := parsed2.(*protocol.SecretRequest)
-    if p2.ProjectID != "proj1" || p2.Environment != "development" || p2.Key != "test_key" {
-        t.Errorf("Parsed SecretRequest fields mismatch")
-    }
+	raw, err := dec.ReadRaw()
+	if err != nil {
+		t.Fatalf("Failed to read raw: %v", err)
+	}
+
+	var parsed protocol.Request
+	if err := protocol.UnmarshalRequest(raw, &parsed); err != nil {
+		t.Fatalf("Failed to unmarshal: %v", err)
+	}
+
+	if parsed.Type != protocol.TypeRequest {
+		t.Errorf("Expected type %s, got %s", protocol.TypeRequest, parsed.Type)
+	}
+	if parsed.Action != protocol.ActionRead {
+		t.Errorf("Expected action %s, got %s", protocol.ActionRead, parsed.Action)
+	}
+	if parsed.Service != "auth-service" {
+		t.Errorf("Expected service auth-service, got %s", parsed.Service)
+	}
+	if len(parsed.Targets) != 2 || parsed.Targets[0] != "db-pass" || parsed.Targets[1] != "api-key" {
+		t.Errorf("Targets mismatch: %+v", parsed.Targets)
+	}
 }
 
-func TestValidationErrors(t *testing.T) {
-    tests := []struct {
-        name     string
-        raw      string
-        wantType protocol.MessageType
-        wantErr  string
-    }{
-        {
-            name:     "Malformed JSON",
-            raw:      `{"type": "`,
-            wantType: "",
-            wantErr:  "malformed JSON",
-        },
-        {
-            name:     "Unknown Type",
-            raw:      `{"type": "UNKNOWN_MSG"}`,
-            wantType: "UNKNOWN_MSG",
-            wantErr:  "unknown message type",
-        },
-        {
-            name:     "Bad SessionInit (wrong types)",
-            raw:      `{"type": "SESSION_INIT", "pid": "should-be-int"}`,
-            wantType: protocol.TypeSessionInit,
-            wantErr:  "invalid SESSION_INIT",
-        },
-    }
+func TestEncodeDecodeResponse(t *testing.T) {
+	var buf bytes.Buffer
+	enc := protocol.NewEncoder(&buf)
 
-    for _, tt := range tests {
-        t.Run(tt.name, func(t *testing.T) {
-            msgType, _, err := protocol.ParseMessage([]byte(tt.raw))
-            if err == nil {
-                t.Fatalf("Expected error, got none")
-            }
-            if msgType != tt.wantType {
-                t.Errorf("Expected type %q, got %q", tt.wantType, msgType)
-            }
-            if !strings.Contains(err.Error(), tt.wantErr) {
-                t.Errorf("Expected error containing %q, got %q", tt.wantErr, err.Error())
-            }
-        })
-    }
+	resp := protocol.Response{
+		Type:   protocol.TypeResponse,
+		Status: "success",
+		Results: []protocol.ResultItem{
+			{Target: "db-pass", Value: "secret-value"},
+		},
+	}
+	if err := enc.Write(resp); err != nil {
+		t.Fatalf("Failed to encode response: %v", err)
+	}
+
+	dec := protocol.NewDecoder(&buf)
+	raw, err := dec.ReadRaw()
+	if err != nil {
+		t.Fatalf("Failed to read raw: %v", err)
+	}
+
+	var parsed protocol.Response
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("Failed to unmarshal: %v", err)
+	}
+
+	if parsed.Status != "success" || len(parsed.Results) != 1 || parsed.Results[0].Value != "secret-value" {
+		t.Errorf("Response mismatch: %+v", parsed)
+	}
+}
+
+func TestWriteRequestAlignmentFields(t *testing.T) {
+	var buf bytes.Buffer
+	enc := protocol.NewEncoder(&buf)
+
+	req := protocol.Request{
+		Type:    protocol.TypeRequest,
+		Action:  protocol.ActionWrite,
+		Service: "billing-service",
+		Targets: []string{"key1", "key2"},
+		Values:  []string{"val1", "val2"},
+	}
+	if err := enc.Write(req); err != nil {
+		t.Fatalf("Failed to encode: %v", err)
+	}
+
+	dec := protocol.NewDecoder(&buf)
+	raw, err := dec.ReadRaw()
+	if err != nil {
+		t.Fatalf("Failed to read: %v", err)
+	}
+
+	var parsed protocol.Request
+	if err := protocol.UnmarshalRequest(raw, &parsed); err != nil {
+		t.Fatalf("Failed to unmarshal: %v", err)
+	}
+
+	if len(parsed.Targets) != len(parsed.Values) {
+		t.Errorf("Target/Value length mismatch: %d vs %d", len(parsed.Targets), len(parsed.Values))
+	}
 }
 
 func TestOversizedMessage(t *testing.T) {
-    longMsg := `{"type": "` + strings.Repeat("a", 65536) + `"}` + "\n"
-    dec := protocol.NewDecoder(strings.NewReader(longMsg))
-    _, err := dec.ReadRaw()
-    if err == nil {
-        t.Fatal("Expected error for oversized message, got none")
-    }
-    if !strings.Contains(err.Error(), "token too long") {
-        t.Errorf("Expected 'token too long' error, got: %v", err)
-    }
+	longMsg := `{"type": "` + strings.Repeat("a", 65536) + `"}` + "\n"
+	dec := protocol.NewDecoder(strings.NewReader(longMsg))
+	_, err := dec.ReadRaw()
+	if err == nil {
+		t.Fatal("Expected error for oversized message, got none")
+	}
+	if !strings.Contains(err.Error(), "token too long") {
+		t.Errorf("Expected 'token too long' error, got: %v", err)
+	}
 }

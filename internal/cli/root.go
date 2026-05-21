@@ -9,9 +9,9 @@ import (
 
 var rootCmd = &cobra.Command{
     Use:   "keychain-auth",
-    Short: "keychain-auth is a security policy daemon for AgentSecrets",
-    Long: `A long-running daemon that mediates access between AgentSecrets and the OS keychain.
-It enforces identity verification and namespace isolation on every secret read.`,
+    Short: "keychain-auth is a security policy daemon for OS Keychain access",
+    Long: `A long-running daemon that mediates access between registered binaries and the OS keychain.
+It enforces identity verification and namespace isolation on every request.`,
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.

@@ -10,8 +10,8 @@ import (
 )
 
 var registerCmd = &cobra.Command{
-    Use:   "register [path/to/agentsecrets]",
-    Short: "Register a trusted AgentSecrets binary",
+    Use:   "register [path/to/binary]",
+    Short: "Register a trusted binary",
     Args:  cobra.ExactArgs(1),
     RunE: func(cmd *cobra.Command, args []string) error {
         path, err := filepath.Abs(args[0])

@@ -4,57 +4,129 @@ import (
 	"io"
 	"log"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/The-17/keychain-auth/internal/audit"
 	"github.com/The-17/keychain-auth/internal/config"
 	"github.com/The-17/keychain-auth/internal/keychain"
-	"github.com/The-17/keychain-auth/internal/namespace"
+	"github.com/The-17/keychain-auth/internal/pending"
 	"github.com/The-17/keychain-auth/internal/protocol"
-	"github.com/The-17/keychain-auth/internal/session"
 	"github.com/The-17/keychain-auth/internal/verify"
 )
 
-// readDeadline is reset after each successful read to allow
-// active connections to stay open while timing out idle ones.
 const readDeadline = 30 * time.Second
 
 type Handler struct {
-	sessions *session.Store
 	verifier verify.Verifier
-	keychain keychain.Reader
+	keychain keychain.Keychain
 	audit    *audit.Logger
-	config   *config.Config
+	pending  *pending.PendingStore
 }
 
 func New(
-	sessions *session.Store,
 	verifier verify.Verifier,
-	kc keychain.Reader,
+	kc keychain.Keychain,
 	auditLog *audit.Logger,
-	cfg *config.Config,
+	pendingStore *pending.PendingStore,
 ) *Handler {
 	return &Handler{
-		sessions: sessions,
 		verifier: verifier,
 		keychain: kc,
 		audit:    auditLog,
-		config:   cfg,
+		pending:  pendingStore,
 	}
 }
 
 // Handle processes messages on a single connection until it closes or errors.
-// One message in, one message out, sequentially. No pipelining.
 func (h *Handler) Handle(conn net.Conn) {
 	defer conn.Close()
 
 	dec := protocol.NewDecoder(conn)
 	enc := protocol.NewEncoder(conn)
 
+	// 1. Retrieve the caller's actual PID from connection
+	pid, err := h.verifier.PeerPID(conn)
+	if err != nil {
+		log.Printf("ERROR: failed to retrieve peer PID: %v", err)
+		return
+	}
+
+	// 2. Resolve caller binary path
+	osPath, err := h.verifier.ResolveBinaryPath(pid)
+	if err != nil {
+		log.Printf("ERROR: failed to resolve binary path for PID %d: %v", pid, err)
+		return
+	}
+
+	// 3. Compute file hash
+	fileHash, err := verify.HashBinary(osPath)
+	if err != nil {
+		log.Printf("ERROR: failed to hash binary %s: %v", osPath, err)
+		return
+	}
+
+	// 4. Live config reload per connection
+	cfg, err := config.Load(config.ConfigPath())
+	if err != nil {
+		log.Printf("ERROR: failed to load config: %v", err)
+		_ = h.audit.Log(audit.Event{
+			Action:     "connect",
+			PID:        pid,
+			BinaryPath: osPath,
+			BinaryHash: fileHash,
+			Result:     "ERROR",
+			Reason:     string(protocol.ReasonInternalError),
+		})
+		_ = enc.Write(protocol.Response{
+			Type:   protocol.TypeResponse,
+			Status: "error",
+			Reason: protocol.ReasonInternalError,
+		})
+		return
+	}
+
+	// 5. Look up binary hash in config
+	binaryPolicy := cfg.FindByHash(fileHash)
+	if binaryPolicy == nil || binaryPolicy.Path != osPath {
+		// Log unregistered attempt to pending.json
+		cmdLine, _ := h.verifier.ResolveCommandLine(pid)
+		if err := h.pending.Add(osPath, fileHash, cmdLine); err != nil {
+			log.Printf("ERROR: failed to add pending attempt: %v", err)
+		}
+
+		reason := protocol.ReasonUnregisteredBinaryPendingApproval
+		_ = h.audit.Log(audit.Event{
+			Action:     "connect",
+			PID:        pid,
+			BinaryPath: osPath,
+			BinaryHash: fileHash,
+			Result:     "DENIED",
+			Reason:     string(reason),
+		})
+
+		// Graceful rejection message before closing socket
+		_ = enc.Write(protocol.Response{
+			Type:   protocol.TypeResponse,
+			Status: "denied",
+			Reason: reason,
+		})
+		return
+	}
+
+	// Log successful connection
+	_ = h.audit.Log(audit.Event{
+		Action:     "connect",
+		PID:        pid,
+		BinaryPath: osPath,
+		BinaryHash: fileHash,
+		Result:     "ACCEPTED",
+	})
+
+	// Sequentially handle requests bound to this authenticated connection
 	for {
-		// Reset read deadline on each loop so active connections stay alive
 		if tc, ok := conn.(*net.UnixConn); ok {
-			tc.SetReadDeadline(time.Now().Add(readDeadline))
+			_ = tc.SetReadDeadline(time.Now().Add(readDeadline))
 		}
 
 		raw, err := dec.ReadRaw()
@@ -62,252 +134,316 @@ func (h *Handler) Handle(conn net.Conn) {
 			if err == io.EOF {
 				return
 			}
-			// Timeout or read error — close silently
 			return
 		}
 
-		msgType, msg, err := protocol.ParseMessage(raw)
-		if err != nil {
-			if msgType != "" {
-				// Known type but invalid — send error response then close
-				_ = enc.Write(protocol.ErrorResponse{
-					Type:   protocol.TypeError,
-					Reason: protocol.ReasonUnknownMessageType,
-				})
-			}
-			return // Close connection on malformed/unknown messages
-		}
-
-		switch msgType {
-		case protocol.TypeSessionInit:
-			h.handleSessionInit(enc, msg.(*protocol.SessionInit))
-		case protocol.TypeSecretRequest:
-			h.handleSecretRequest(enc, msg.(*protocol.SecretRequest))
-		}
-	}
-}
-
-func (h *Handler) handleSessionInit(enc *protocol.Encoder, msg *protocol.SessionInit) {
-	// Step 0: Validate protocol version
-	if msg.ProtocolVersion != "1" {
-		h.logAndReject(enc, msg.PID, msg.BinaryPath, protocol.ReasonUnsupportedProtocol)
-		return
-	}
-
-	// Step 1: Validate the PID
-	osPath, err := h.verifier.ResolveBinaryPath(msg.PID)
-	if err != nil {
-		h.logAndReject(enc, msg.PID, msg.BinaryPath, protocol.ReasonInvalidPID)
-		return
-	}
-
-	// Step 2: Verify the binary path — OS ground truth vs. claimed
-	if osPath != msg.BinaryPath {
-		h.logAndReject(enc, msg.PID, msg.BinaryPath, protocol.ReasonPathMismatch)
-		return
-	}
-
-	// Step 3a: Compute file hash
-	fileHash, err := verify.HashBinary(osPath)
-	if err != nil {
-		h.logAndReject(enc, msg.PID, osPath, protocol.ReasonHashMismatch)
-		return
-	}
-
-	// Step 3b: File hash must match what AgentSecrets claims
-	if fileHash != msg.BinaryHash {
-		h.logAndReject(enc, msg.PID, osPath, protocol.ReasonHashMismatch)
-		return
-	}
-
-	// Step 3c: File hash must match a registered binary
-	if h.config.FindByHash(fileHash) == nil {
-		h.logAndReject(enc, msg.PID, osPath, protocol.ReasonHashMismatch)
-		return
-	}
-
-	// Step 4: Issue session token
-	sess, replaced := h.sessions.Create(msg.PID, osPath, fileHash)
-
-	if replaced {
-		log.Printf("WARN: replaced existing session for PID %d", msg.PID)
-		if err := h.audit.Log(audit.Event{
-			EventType:          "SESSION_REPLACED",
-			PID:                msg.PID,
-			BinaryPath:         osPath,
-			Result:             "REPLACED",
-			SessionTokenPrefix: sess.TokenPrefix(),
-		}); err != nil {
-			log.Printf("ERROR: audit log write failed: %v", err)
-		}
-	}
-
-	if err := h.audit.Log(audit.Event{
-		EventType:          "SESSION_INIT",
-		PID:                msg.PID,
-		BinaryPath:         osPath,
-		Result:             "ACCEPTED",
-		SessionTokenPrefix: sess.TokenPrefix(),
-	}); err != nil {
-		log.Printf("ERROR: audit log write failed: %v", err)
-	}
-
-	_ = enc.Write(protocol.SessionAccepted{
-		Type:         protocol.TypeSessionAccepted,
-		SessionToken: sess.TokenHex(),
-	})
-}
-
-func (h *Handler) handleSecretRequest(enc *protocol.Encoder, msg *protocol.SecretRequest) {
-	// Step 1: Look up the session
-	sess := h.sessions.Lookup(msg.SessionToken)
-	if sess == nil {
-		if err := h.audit.Log(audit.Event{
-			EventType: "SECRET_REQUEST",
-			Key:       msg.Key,
-			Result:    "DENIED",
-			Reason:    string(protocol.ReasonUnknownSession),
-		}); err != nil {
-			log.Printf("ERROR: audit log write failed: %v", err)
-		}
-		_ = enc.Write(protocol.SecretDenied{
-			Type: protocol.TypeSecretDenied, Key: msg.Key,
-			Reason: protocol.ReasonUnknownSession,
-		})
-		return
-	}
-
-	// Step 2: Re-validate PID is still alive
-	alive, err := h.verifier.IsProcessAlive(sess.PID)
-	if err != nil || !alive {
-		h.sessions.Invalidate(msg.SessionToken)
-		h.auditDeny(sess, msg.Key, msg.ProjectID, msg.Environment, protocol.ReasonSessionExpired)
-		_ = enc.Write(protocol.SecretDenied{
-			Type: protocol.TypeSecretDenied, Key: msg.Key,
-			Reason: protocol.ReasonSessionExpired,
-		})
-		return
-	}
-
-	// Step 3: Re-validate the binary has not changed
-	osPath, err := h.verifier.ResolveBinaryPath(sess.PID)
-	if err != nil {
-		h.sessions.Invalidate(msg.SessionToken)
-		h.auditDeny(sess, msg.Key, msg.ProjectID, msg.Environment, protocol.ReasonSessionInvalidated)
-		_ = enc.Write(protocol.SecretDenied{
-			Type: protocol.TypeSecretDenied, Key: msg.Key,
-			Reason: protocol.ReasonSessionInvalidated,
-		})
-		return
-	}
-
-	currentHash, err := verify.HashBinary(osPath)
-	if err != nil || currentHash != sess.BinaryHash {
-		h.sessions.Invalidate(msg.SessionToken)
-		h.auditDeny(sess, msg.Key, msg.ProjectID, msg.Environment, protocol.ReasonSessionInvalidated)
-		_ = enc.Write(protocol.SecretDenied{
-			Type: protocol.TypeSecretDenied, Key: msg.Key,
-			Reason: protocol.ReasonSessionInvalidated,
-		})
-		return
-	}
-
-	// Step 4: Validate all key components in one pass
-	if err := namespace.ValidateSecretRequest(msg.Key, msg.ProjectID, msg.Environment); err != nil {
-		h.auditDeny(sess, msg.Key, msg.ProjectID, msg.Environment, protocol.ReasonInvalidKey)
-		_ = enc.Write(protocol.SecretDenied{
-			Type: protocol.TypeSecretDenied, Key: msg.Key,
-			Reason: protocol.ReasonInvalidKey,
-		})
-		return
-	}
-
-	// Step 5: Construct the keychain key and read
-	keychainKey := namespace.KeychainKey(msg.ProjectID, msg.Environment, msg.Key)
-
-	// Final namespace guard: verify the constructed key matches the allowed pattern
-	if !namespace.IsAllowedKeychainKey(keychainKey) {
-		h.auditDeny(sess, msg.Key, msg.ProjectID, msg.Environment, protocol.ReasonInvalidKey)
-		_ = enc.Write(protocol.SecretDenied{
-			Type: protocol.TypeSecretDenied, Key: msg.Key,
-			Reason: protocol.ReasonInvalidKey,
-		})
-		return
-	}
-
-	value, err := h.keychain.Read(keychainKey)
-	if err != nil {
-		// Fallback for legacy AgentSecrets data format (development only)
-		if msg.Environment == "development" {
-			legacyKey := namespace.LegacyKeychainKey(msg.ProjectID, msg.Key)
-			// Guard the legacy path with its own namespace check
-			if namespace.IsAllowedLegacyKeychainKey(legacyKey) {
-				value, err = h.keychain.Read(legacyKey)
-			}
-		}
-
-		if err != nil {
-			h.auditDeny(sess, msg.Key, msg.ProjectID, msg.Environment, protocol.ReasonSecretNotFound)
-			_ = enc.Write(protocol.SecretDenied{
-				Type: protocol.TypeSecretDenied, Key: msg.Key,
-				Reason: protocol.ReasonSecretNotFound,
+		var req protocol.Request
+		if err := protocol.UnmarshalRequest(raw, &req); err != nil {
+			_ = enc.Write(protocol.Response{
+				Type:   protocol.TypeResponse,
+				Status: "error",
+				Reason: protocol.ReasonMalformedRequest,
 			})
 			return
 		}
+
+		h.processRequest(enc, &req, pid, osPath, fileHash, binaryPolicy)
+	}
+}
+
+func (h *Handler) processRequest(
+	enc *protocol.Encoder,
+	req *protocol.Request,
+	pid int,
+	binPath, binHash string,
+	policy *config.RegisteredBinary,
+) {
+	// Step 1: Normalize match mode (default to "exact")
+	if req.Match == "" {
+		req.Match = protocol.MatchExact
+	}
+	if req.Match != protocol.MatchExact && req.Match != protocol.MatchPrefix {
+		h.writeError(enc, protocol.ReasonMalformedRequest, pid, binPath, binHash, req)
+		return
 	}
 
-	// Step 6: Log the grant and return the secret
-	if err := h.audit.Log(audit.Event{
-		EventType:          "SECRET_REQUEST",
-		PID:                sess.PID,
-		BinaryPath:         sess.BinaryPath,
-		ProjectID:          msg.ProjectID,
-		Environment:        msg.Environment,
-		Key:                msg.Key,
-		Result:             "GRANTED",
-		SessionTokenPrefix: sess.TokenPrefix(),
-	}); err != nil {
-		log.Printf("ERROR: audit log write failed: %v", err)
+	// Step 2: Pre-flight checks & input validation
+	if req.Type != protocol.TypeRequest {
+		h.writeError(enc, protocol.ReasonMalformedRequest, pid, binPath, binHash, req)
+		return
 	}
 
-	// ONLY place a secret value is transmitted. NEVER log this.
-	_ = enc.Write(protocol.SecretResponse{
-		Type:  protocol.TypeSecretResponse,
-		Key:   msg.Key,
-		Value: value,
+	// Targets are required for exact mode (except search).
+	// For prefix mode, targets are required (they are the prefixes).
+	if req.Match == protocol.MatchExact && req.Action != protocol.ActionSearch && len(req.Targets) == 0 {
+		h.writeError(enc, protocol.ReasonMalformedRequest, pid, binPath, binHash, req)
+		return
+	}
+	if req.Match == protocol.MatchPrefix && len(req.Targets) == 0 {
+		h.writeError(enc, protocol.ReasonMalformedRequest, pid, binPath, binHash, req)
+		return
+	}
+
+	// Write action cannot use prefix matching (no meaning for writes)
+	if req.Match == protocol.MatchPrefix && req.Action == protocol.ActionWrite {
+		h.writeError(enc, protocol.ReasonMalformedRequest, pid, binPath, binHash, req)
+		return
+	}
+
+	// Strict write array alignment
+	if req.Action == protocol.ActionWrite {
+		if len(req.Targets) != len(req.Values) {
+			h.writeError(enc, protocol.ReasonMalformedRequest, pid, binPath, binHash, req)
+			return
+		}
+	}
+
+	// Step 3: Policy authorization
+	switch req.Action {
+	case protocol.ActionRead:
+		if !contains(policy.AllowedReadServices, req.Service) {
+			h.writeDenied(enc, protocol.ReasonServiceNotAllowed, pid, binPath, binHash, req)
+			return
+		}
+		// Prefix read internally enumerates keys, so it requires can_search
+		if req.Match == protocol.MatchPrefix && !policy.CanSearch {
+			h.writeDenied(enc, protocol.ReasonActionNotInPolicy, pid, binPath, binHash, req)
+			return
+		}
+	case protocol.ActionSearch:
+		if !policy.CanSearch || !contains(policy.AllowedReadServices, req.Service) {
+			h.writeDenied(enc, protocol.ReasonActionNotInPolicy, pid, binPath, binHash, req)
+			return
+		}
+	case protocol.ActionWrite:
+		if !contains(policy.AllowedWriteServices, req.Service) {
+			h.writeDenied(enc, protocol.ReasonServiceNotAllowed, pid, binPath, binHash, req)
+			return
+		}
+	case protocol.ActionDelete:
+		if !contains(policy.AllowedWriteServices, req.Service) {
+			h.writeDenied(enc, protocol.ReasonServiceNotAllowed, pid, binPath, binHash, req)
+			return
+		}
+		// Prefix delete internally enumerates keys, so it requires can_search
+		if req.Match == protocol.MatchPrefix && !policy.CanSearch {
+			h.writeDenied(enc, protocol.ReasonActionNotInPolicy, pid, binPath, binHash, req)
+			return
+		}
+	default:
+		h.writeError(enc, protocol.ReasonMalformedRequest, pid, binPath, binHash, req)
+		return
+	}
+
+	// Step 4: Execute OS keychain operations
+	var results []protocol.ResultItem
+
+	switch req.Action {
+	case protocol.ActionRead:
+		if req.Match == protocol.MatchPrefix {
+			// Prefix read: search → filter → read values
+			matchedTargets, err := h.resolveByPrefix(req.Service, req.Targets)
+			if err != nil {
+				h.logAndWriteError(enc, req, pid, binPath, binHash, err)
+				return
+			}
+			for _, target := range matchedTargets {
+				val, err := h.keychain.Read(req.Service, target)
+				if err != nil {
+					h.logAndWriteError(enc, req, pid, binPath, binHash, err)
+					return
+				}
+				results = append(results, protocol.ResultItem{
+					Target: target,
+					Value:  val,
+				})
+			}
+		} else {
+			// Exact read: direct key lookup
+			for _, target := range req.Targets {
+				val, err := h.keychain.Read(req.Service, target)
+				if err != nil {
+					h.logAndWriteError(enc, req, pid, binPath, binHash, err)
+					return
+				}
+				results = append(results, protocol.ResultItem{
+					Target: target,
+					Value:  val,
+				})
+			}
+		}
+
+	case protocol.ActionWrite:
+		for i, target := range req.Targets {
+			val := req.Values[i]
+			if err := h.keychain.Write(req.Service, target, val); err != nil {
+				h.logAndWriteError(enc, req, pid, binPath, binHash, err)
+				return
+			}
+		}
+
+	case protocol.ActionDelete:
+		if req.Match == protocol.MatchPrefix {
+			// Prefix delete: search → filter → delete matches
+			matchedTargets, err := h.resolveByPrefix(req.Service, req.Targets)
+			if err != nil {
+				h.logAndWriteError(enc, req, pid, binPath, binHash, err)
+				return
+			}
+			for _, target := range matchedTargets {
+				if err := h.keychain.Delete(req.Service, target); err != nil {
+					h.logAndWriteError(enc, req, pid, binPath, binHash, err)
+					return
+				}
+			}
+		} else {
+			for _, target := range req.Targets {
+				if err := h.keychain.Delete(req.Service, target); err != nil {
+					h.logAndWriteError(enc, req, pid, binPath, binHash, err)
+					return
+				}
+			}
+		}
+
+	case protocol.ActionSearch:
+		targets, err := h.keychain.Search(req.Service)
+		if err != nil {
+			h.logAndWriteError(enc, req, pid, binPath, binHash, err)
+			return
+		}
+		for _, target := range targets {
+			if len(req.Targets) > 0 {
+				if !matchesAnyPrefix(target, req.Targets) {
+					continue
+				}
+			}
+			results = append(results, protocol.ResultItem{
+				Target: target,
+			})
+		}
+	}
+
+	// Log successful request in audit log (granular per-target records)
+	_ = h.audit.Log(audit.Event{
+		Action:     string(req.Action),
+		PID:        pid,
+		BinaryPath: binPath,
+		BinaryHash: binHash,
+		Service:    req.Service,
+		Targets:    req.Targets,
+		Result:     "GRANTED",
+	})
+
+	_ = enc.Write(protocol.Response{
+		Type:    protocol.TypeResponse,
+		Status:  "success",
+		Results: results,
 	})
 }
 
-// --- Helper methods ---
-
-func (h *Handler) logAndReject(enc *protocol.Encoder, pid int, binaryPath string, reason protocol.RejectReason) {
-	if err := h.audit.Log(audit.Event{
-		EventType:  "SESSION_INIT",
-		PID:        pid,
-		BinaryPath: binaryPath,
-		Result:     "REJECTED",
-		Reason:     string(reason),
-	}); err != nil {
-		log.Printf("ERROR: audit log write failed: %v", err)
+// resolveByPrefix performs a search on the service namespace and returns only
+// the targets that match at least one of the given prefixes.
+func (h *Handler) resolveByPrefix(service string, prefixes []string) ([]string, error) {
+	allTargets, err := h.keychain.Search(service)
+	if err != nil {
+		return nil, err
 	}
-	_ = enc.Write(protocol.SessionRejected{
-		Type:   protocol.TypeSessionRejected,
+	var matched []string
+	for _, target := range allTargets {
+		if matchesAnyPrefix(target, prefixes) {
+			matched = append(matched, target)
+		}
+	}
+	return matched, nil
+}
+
+// logAndWriteError logs an internal error event and writes an error response.
+func (h *Handler) logAndWriteError(
+	enc *protocol.Encoder,
+	req *protocol.Request,
+	pid int, binPath, binHash string,
+	err error,
+) {
+	_ = h.audit.Log(audit.Event{
+		Action:     string(req.Action),
+		PID:        pid,
+		BinaryPath: binPath,
+		BinaryHash: binHash,
+		Service:    req.Service,
+		Targets:    req.Targets,
+		Result:     "ERROR",
+		Reason:     err.Error(),
+	})
+	_ = enc.Write(protocol.Response{
+		Type:   protocol.TypeResponse,
+		Status: "error",
+		Reason: protocol.ReasonInternalError,
+	})
+}
+
+// matchesAnyPrefix returns true if s starts with any of the given prefixes.
+func matchesAnyPrefix(s string, prefixes []string) bool {
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(s, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *Handler) writeDenied(
+	enc *protocol.Encoder,
+	reason protocol.ReasonCode,
+	pid int,
+	binPath, binHash string,
+	req *protocol.Request,
+) {
+	_ = h.audit.Log(audit.Event{
+		Action:     string(req.Action),
+		PID:        pid,
+		BinaryPath: binPath,
+		BinaryHash: binHash,
+		Service:    req.Service,
+		Targets:    req.Targets,
+		Result:     "DENIED",
+		Reason:     string(reason),
+	})
+	_ = enc.Write(protocol.Response{
+		Type:   protocol.TypeResponse,
+		Status: "denied",
 		Reason: reason,
 	})
 }
 
-func (h *Handler) auditDeny(sess *session.Session, key, projectID, env string, reason protocol.RejectReason) {
-	if err := h.audit.Log(audit.Event{
-		EventType:          "SECRET_REQUEST",
-		PID:                sess.PID,
-		BinaryPath:         sess.BinaryPath,
-		ProjectID:          projectID,
-		Environment:        env,
-		Key:                key,
-		Result:             "DENIED",
-		Reason:             string(reason),
-		SessionTokenPrefix: sess.TokenPrefix(),
-	}); err != nil {
-		log.Printf("ERROR: audit log write failed: %v", err)
+func (h *Handler) writeError(
+	enc *protocol.Encoder,
+	reason protocol.ReasonCode,
+	pid int,
+	binPath, binHash string,
+	req *protocol.Request,
+) {
+	_ = h.audit.Log(audit.Event{
+		Action:     string(req.Action),
+		PID:        pid,
+		BinaryPath: binPath,
+		BinaryHash: binHash,
+		Service:    req.Service,
+		Targets:    req.Targets,
+		Result:     "ERROR",
+		Reason:     string(reason),
+	})
+	_ = enc.Write(protocol.Response{
+		Type:   protocol.TypeResponse,
+		Status: "error",
+		Reason: reason,
+	})
+}
+
+func contains(slice []string, s string) bool {
+	for _, item := range slice {
+		if item == s {
+			return true
+		}
 	}
+	return false
 }

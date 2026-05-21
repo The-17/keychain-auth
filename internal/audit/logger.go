@@ -11,16 +11,15 @@ import (
 
 // Event represents a single audit log entry.
 type Event struct {
-	Timestamp          string `json:"timestamp"`
-	EventType          string `json:"event_type"` // e.g., SESSION_INIT, SECRET_REQUEST
-	PID                int    `json:"pid,omitempty"`
-	BinaryPath         string `json:"binary_path,omitempty"`
-	ProjectID          string `json:"project_id,omitempty"`
-	Environment        string `json:"environment,omitempty"`
-	Key                string `json:"key,omitempty"`                  // The requested secret key name
-	Result             string `json:"result"`                         // ACCEPTED, REJECTED, GRANTED, DENIED
-	Reason             string `json:"reason,omitempty"`               // Reason for rejection/denial
-	SessionTokenPrefix string `json:"session_token_prefix,omitempty"` // For correlating requests to sessions
+	Timestamp  string   `json:"timestamp"`
+	Action     string   `json:"action"` // e.g. connect, read, write, delete, search
+	PID        int      `json:"pid"`
+	BinaryPath string   `json:"binary_path"`
+	BinaryHash string   `json:"binary_hash"`
+	Service    string   `json:"service,omitempty"`
+	Targets    []string `json:"targets,omitempty"`
+	Result     string   `json:"result"`           // GRANTED, DENIED, ERROR, ACCEPTED
+	Reason     string   `json:"reason,omitempty"`
 }
 
 // Logger provides thread-safe, append-only JSON logging.

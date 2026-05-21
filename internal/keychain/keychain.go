@@ -1,11 +1,17 @@
 package keychain
 
-// Reader is the interface for reading secrets from the OS keychain.
-// keychain-auth ONLY reads. Writing and deleting are AgentSecrets' responsibility.
-type Reader interface {
-    // Read retrieves a secret value by its keychain key name.
-    // The keychainKey is already in the format "{projectID}:{environment}:{key}" 
-    // or the legacy "Secret_{projectID}_{key}".
-    // Returns the plaintext value or an error if the key is not found.
-    Read(keychainKey string) (string, error)
+// Keychain is the interface for interacting with the OS keychain.
+type Keychain interface {
+	// Read retrieves a secret value by its service name and target key/account.
+	Read(service, target string) (string, error)
+
+	// Write creates or updates a secret value for a service and target.
+	Write(service, target, value string) error
+
+	// Delete removes a secret for a service and target.
+	Delete(service, target string) error
+
+	// Search returns a list of target keys/accounts registered under the given service.
+	// It does NOT return secret values.
+	Search(service string) ([]string, error)
 }

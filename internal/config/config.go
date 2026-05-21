@@ -8,10 +8,15 @@ import (
 	"time"
 )
 
+var ConfigPathOverride string
+
 type RegisteredBinary struct {
-	Path         string `json:"path"`
-	Hash         string `json:"hash"`
-	RegisteredAt string `json:"registered_at"`
+	Path                 string   `json:"path"`
+	Hash                 string   `json:"hash"`
+	RegisteredAt         string   `json:"registered_at"`
+	AllowedReadServices  []string `json:"allowed_read_services"`
+	AllowedWriteServices []string `json:"allowed_write_services"`
+	CanSearch            bool     `json:"can_search"`
 }
 
 type Config struct {
@@ -66,10 +71,15 @@ func (c *Config) Register(path, hash string) error {
 			return nil
 		}
 	}
+	
+	// Maximally restrictive default (Zero Trust)
 	c.RegisteredBinaries = append(c.RegisteredBinaries, RegisteredBinary{
-		Path:         path,
-		Hash:         hash,
-		RegisteredAt: time.Now().UTC().Format(time.RFC3339),
+		Path:                 path,
+		Hash:                 hash,
+		RegisteredAt:         time.Now().UTC().Format(time.RFC3339),
+		AllowedReadServices:  []string{},
+		AllowedWriteServices: []string{},
+		CanSearch:            false,
 	})
 	return nil
 }
@@ -83,4 +93,8 @@ func (c *Config) FindByHash(hash string) *RegisteredBinary {
 		}
 	}
 	return nil
+}
+
+func PendingPath() string {
+	return filepath.Join(filepath.Dir(ConfigPath()), "pending.json")
 }

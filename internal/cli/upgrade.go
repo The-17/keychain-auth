@@ -10,7 +10,7 @@ import (
 )
 
 var upgradeCmd = &cobra.Command{
-    Use:   "upgrade [path/to/agentsecrets]",
+    Use:   "upgrade [path/to/binary]",
     Short: "Update the hash for an already registered binary path",
     Args:  cobra.ExactArgs(1),
     RunE: func(cmd *cobra.Command, args []string) error {

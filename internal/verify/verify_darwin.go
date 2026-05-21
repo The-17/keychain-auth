@@ -9,6 +9,7 @@ package verify
 import "C"
 import (
 	"fmt"
+	"net"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -41,4 +42,37 @@ func (v *DarwinVerifier) IsProcessAlive(pid int) (bool, error) {
 		return false, nil
 	}
 	return false, err
+}
+
+func (v *DarwinVerifier) PeerPID(conn net.Conn) (int, error) {
+	unixConn, ok := conn.(*net.UnixConn)
+	if !ok {
+		return 0, fmt.Errorf("connection is not a UNIX socket")
+	}
+
+	rawConn, err := unixConn.SyscallConn()
+	if err != nil {
+		return 0, fmt.Errorf("get syscall connection: %w", err)
+	}
+
+	var peerPID int
+	var sysErr error
+	err = rawConn.Control(func(fd uintptr) {
+		peerPID, sysErr = unix.GetsockoptInt(int(fd), unix.SOL_LOCAL, unix.LOCAL_PEERPID)
+	})
+	if err != nil {
+		return 0, fmt.Errorf("syscall control error: %w", err)
+	}
+	if sysErr != nil {
+		return 0, fmt.Errorf("getsockopt local_peerpid error: %w", sysErr)
+	}
+	return peerPID, nil
+}
+
+func (v *DarwinVerifier) ResolveCommandLine(pid int) ([]string, error) {
+	path, err := v.ResolveBinaryPath(pid)
+	if err != nil {
+		return nil, err
+	}
+	return []string{path}, nil
 }

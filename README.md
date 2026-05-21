@@ -50,13 +50,14 @@ Because searches return targets only, fetching secret values requires explicit `
 
 Clients communicate with the daemon using a generalized JSON protocol optimized for batch operations.
 
-### 1. Request Structure (Batch Support)
-Clients can request or write multiple secrets in a single socket round-trip.
+### 1. Request Structure (Batch & Prefix Support)
+Clients can request, write, or delete multiple secrets in a single socket round-trip. Using the optional `"match": "prefix"` field, they can perform bulk operations (read/delete) matching target name prefixes.
 ```json
 {
   "type": "REQUEST",
   "action": "read | write | delete | search",
   "service": "aws",
+  "match": "exact | prefix",
   "targets": ["prod-api-key", "prod-db-password"],
   "values": ["optional-value-for-write-1", "optional-value-for-write-2"],
   "attributes": {
@@ -64,13 +65,17 @@ Clients can request or write multiple secrets in a single socket round-trip.
   }
 }
 ```
-*Note: Write requests enforce strict array alignment. `len(targets)` must exactly match `len(values)`.*
+*Notes:*
+* Write requests enforce strict array alignment: `len(targets)` must exactly match `len(values)`.
+* `"match": "prefix"` is supported for `read`, `delete`, and `search` actions (not allowed for `write`).
+* Prefix reads/deletes require that the binary has `can_search: true` in addition to target service permission.
 
 ### 2. Batch Atomicity & Pre-Flight Checks
 Requests are **all-or-nothing**. The daemon evaluates all requested `targets` against the binary's access policy *before* executing any OS keychain operations. If a single target is denied, the entire batch is rejected.
 
-### 3. Response Structure (Blast-Radius Limits)
-**Search operations return key targets only, never plaintext secrets.** To fetch the secret, a subsequent `read` request is required.
+### 3. Response Structure & Blast-Radius Limits
+* **Standard search operations return key targets only, never plaintext secrets.** To fetch their secrets, subsequent explicit `read` requests are required to maintain a secure audit trail.
+* **Prefix reads** (using `"match": "prefix"` with `"action": "read"`) retrieve both the target keys and their actual plaintext values for all matched keys in a single socket roundtrip.
 
 ```json
 {
@@ -88,6 +93,7 @@ Requests are **all-or-nothing**. The daemon evaluates all requested `targets` ag
   ]
 }
 ```
+
 
 ---
 

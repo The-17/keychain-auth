@@ -8,11 +8,14 @@ import (
 )
 
 func ConfigPath() string {
-    dir := os.Getenv("XDG_CONFIG_HOME")
-    if dir == "" {
-        dir = filepath.Join(os.Getenv("HOME"), ".config")
-    }
-    return filepath.Join(dir, "keychain-auth", "config.json")
+	if ConfigPathOverride != "" {
+		return ConfigPathOverride
+	}
+	dir := os.Getenv("XDG_CONFIG_HOME")
+	if dir == "" {
+		dir = filepath.Join(os.Getenv("HOME"), ".config")
+	}
+	return filepath.Join(dir, "keychain-auth", "config.json")
 }
 
 func AuditLogPath() string {

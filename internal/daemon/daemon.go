@@ -6,7 +6,6 @@ import (
 	"net"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -44,23 +43,23 @@ func New(socketPath string, h ConnectionHandler) *Daemon {
 // Run starts the daemon and blocks until SIGINT or SIGTERM is received.
 func (d *Daemon) Run() error {
 	// Ensure the socket directory exists
-	if err := os.MkdirAll(filepath.Dir(d.socketPath), 0700); err != nil {
+	if err := ensureDir(d.socketPath); err != nil {
 		return err
 	}
 
 	// Remove stale socket if present (single file only, not recursive)
-	if err := os.Remove(d.socketPath); err != nil && !os.IsNotExist(err) {
+	if err := removeStale(d.socketPath); err != nil {
 		return err
 	}
 
-	l, err := net.Listen("unix", d.socketPath)
+	l, err := listen(d.socketPath)
 	if err != nil {
 		return err
 	}
 	d.listener = l
 
 	// Ensure only the owner can access the socket (0600)
-	if err := os.Chmod(d.socketPath, 0600); err != nil {
+	if err := chmod(d.socketPath); err != nil {
 		l.Close()
 		return err
 	}

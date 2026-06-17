@@ -90,6 +90,7 @@ func (d *Daemon) acceptLoop(ctx context.Context) {
 				return // Shutdown requested
 			default:
 				log.Printf("accept error: %v", err)
+				time.Sleep(100 * time.Millisecond)
 				continue
 			}
 		}

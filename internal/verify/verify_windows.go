@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"time"
 
 	"golang.org/x/sys/windows"
@@ -30,9 +31,30 @@ func (v *WindowsVerifier) ResolveBinaryPath(pid int) (string, error) {
 	buf := make([]uint16, size)
 	err = windows.QueryFullProcessImageName(h, 0, &buf[0], &size)
 	if err != nil {
-		return "", fmt.Errorf("query process image name for PID %d: %w", pid, err)
+		// Fallback to native path format (useful for processes launched from network UNC/WSL paths)
+		errNative := windows.QueryFullProcessImageName(h, 1, &buf[0], &size)
+		if errNative != nil {
+			return "", fmt.Errorf("query process image name for PID %d: %w (native fallback: %v)", pid, err, errNative)
+		}
+		nativePath := windows.UTF16ToString(buf[:size])
+		return mapNativePath(nativePath), nil
 	}
 	return windows.UTF16ToString(buf[:size]), nil
+}
+
+func mapNativePath(path string) string {
+	lower := strings.ToLower(path)
+	if strings.HasPrefix(lower, `\device\mup\`) {
+		return `\\` + path[12:]
+	}
+	if strings.HasPrefix(lower, `\systemroot\`) {
+		sysRoot := os.Getenv("SystemRoot")
+		if sysRoot == "" {
+			sysRoot = `C:\Windows`
+		}
+		return sysRoot + path[12:]
+	}
+	return path
 }
 
 // IsProcessAlive checks whether the given PID is still running on Windows.

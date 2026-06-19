@@ -48,8 +48,16 @@ func New() *DarwinKeychain {
 }
 
 func (dk *DarwinKeychain) Read(service, target string) (string, error) {
-	return gokeyring.Get(service, target)
+	val, err := gokeyring.Get(service, target)
+	if err != nil {
+		if err == gokeyring.ErrNotFound {
+			return "", ErrNotFound
+		}
+		return "", err
+	}
+	return val, nil
 }
+
 
 func (dk *DarwinKeychain) Write(service, target, value string) error {
 	return gokeyring.Set(service, target, value)

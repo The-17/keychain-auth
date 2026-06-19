@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"errors"
 	"io"
 	"log"
 	"net"
@@ -250,6 +251,9 @@ func (h *Handler) processRequest(
 			for _, target := range matchedTargets {
 				val, err := h.keychain.Read(req.Service, target)
 				if err != nil {
+					if errors.Is(err, keychain.ErrNotFound) {
+						continue // Key vanished between search and read — skip.
+					}
 					h.logAndWriteError(enc, req, pid, binPath, binHash, err)
 					return
 				}
@@ -259,10 +263,17 @@ func (h *Handler) processRequest(
 				})
 			}
 		} else {
-			// Exact read: direct key lookup
+			// Exact read: direct key lookup.
+			// ErrNotFound means the key simply doesn't exist yet — return an empty
+			// success rather than internal_error. This is the correct behaviour for
+			// optional keychain entries such as the workspace allowlist cache.
 			for _, target := range req.Targets {
 				val, err := h.keychain.Read(req.Service, target)
 				if err != nil {
+					if errors.Is(err, keychain.ErrNotFound) {
+						// Key absent — skip silently, caller receives 0 results.
+						continue
+					}
 					h.logAndWriteError(enc, req, pid, binPath, binHash, err)
 					return
 				}

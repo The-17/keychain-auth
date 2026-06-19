@@ -38,11 +38,22 @@ Because searches return targets only, fetching secret values requires explicit `
 └──────────────────┘                        └──────────────────┘                   └──────────────┘
 ```
 
-### Connection-Bound Auth (No Session Tokens)
-1.  **Connection Initiation:** The client connects over a local Unix domain socket (or a secure Windows Named Pipe).
-2.  **Process Verification:** The daemon retrieves the caller's true PID from the kernel and verifies its binary path and SHA-256 hash.
-3.  **Policy Binding:** The daemon re-reads `config.json` instantly and binds the binary's access policy to the active socket connection. 
-4.  **Request Handling:** The client issues general `REQUEST` payloads (for read, write, delete, or search). The connection *is* the session.
+### IPC Channel Specification
+Clients connect to the daemon over:
+*   **macOS / Linux**: Unix domain socket at `~/.config/keychain-auth/keychain-auth.sock`.
+*   **Windows**: Named Pipe at `\\.\pipe\keychain-auth`.
+
+### Connection Handshake Probe
+1.  **Connection Initiation:** The client opens the IPC channel. Since the daemon verifies the caller's PID/binary hash immediately upon connection, the client *must* set a short read deadline (e.g., 50ms) and check for an immediate `RESPONSE` status of `"denied"`. If the connection is dropped or a denial is received, the client fails. If the probe times out without a message, the client clears the deadline and assumes connection acceptance.
+2.  **Protocol Sanity Check (PING):** The client sends a search request (`Type: "REQUEST", Action: "search"`) as a protocol check to verify the daemon is responsive and supports the JSON protocol.
+3.  **Request Handling:** Once validated, the connection is bound as the authenticated session. The client can then execute request payloads.
+
+### GCM-Encrypted File Fallback
+In headless environments, WSL, or systems where standard desktop keyrings (GNOME Keyring/KWallet/D-Bus) are absent:
+*   `keychain-auth` implements an automated fallback to an AES-256-GCM encrypted file store.
+*   Data is written to `keychain.enc` inside the platform-appropriate directory (e.g. `~/.local/share/keychain-auth/`).
+*   The AES key is kept inside `keychain.key` with strict user-only read permissions (`0600`).
+*   This preserves the Zero-Disk-Plaintext security guarantee, preventing raw credentials from being written to disk files.
 
 ---
 

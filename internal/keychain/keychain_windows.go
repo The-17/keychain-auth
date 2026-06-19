@@ -18,9 +18,18 @@ func New() *WindowsKeychain {
 }
 
 // Read retrieves a secret value by its service name and target key/account.
+// Returns ErrNotFound if the key does not exist in Windows Credential Manager.
 func (wk *WindowsKeychain) Read(service, target string) (string, error) {
-	return gokeyring.Get(service, target)
+	val, err := gokeyring.Get(service, target)
+	if err != nil {
+		if err == gokeyring.ErrNotFound {
+			return "", ErrNotFound
+		}
+		return "", err
+	}
+	return val, nil
 }
+
 
 // Write creates or updates a secret value for a service and target.
 func (wk *WindowsKeychain) Write(service, target, value string) error {

@@ -3,8 +3,14 @@
 package keychain
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -14,104 +20,224 @@ import (
 )
 
 type LinuxKeychain struct {
-	useInMemoryBackend bool
-	dbMu               sync.Mutex
-	db                 map[string]string // maps "service:target" -> value
+	useFileBackend bool
+	storePath      string // path to encrypted data file
+	keyPath        string // path to encryption key file
+	mu             sync.Mutex
+	cache          map[string]string // in-memory cache of file store for fast reads
 }
 
 func New() *LinuxKeychain {
-	lk := &LinuxKeychain{
-		db: make(map[string]string),
-	}
+	lk := &LinuxKeychain{}
 
 	if runtime.GOOS == "linux" {
-		if os.Getenv("WSL_DISTRO_NAME") != "" || os.Getenv("DISPLAY") == "" {
-			lk.useInMemoryBackend = true
+		needsFileBackend := false
+
+		// Test if keyring actually works
+		testKey := "__keychain_auth_keyring_test__"
+		if err := gokeyring.Set("keychain-auth-test", testKey, "test"); err != nil {
+			needsFileBackend = true
 		} else {
-			// Test if keyring actually works
-			testKey := "__keychain_auth_keyring_test__"
-			if err := gokeyring.Set("keychain-auth-test", testKey, "test"); err != nil {
-				lk.useInMemoryBackend = true
-			} else {
-				_ = gokeyring.Delete("keychain-auth-test", testKey)
-			}
+			_ = gokeyring.Delete("keychain-auth-test", testKey)
+		}
+
+		if needsFileBackend {
+			lk.useFileBackend = true
+			storeDir := fileStoreDir()
+			lk.storePath = filepath.Join(storeDir, "keychain.enc")
+			lk.keyPath = filepath.Join(storeDir, "keychain.key")
+
+			// Ensure store directory exists with strict permissions
+			_ = os.MkdirAll(storeDir, 0700)
+
+			// Load existing data from disk
+			lk.cache = lk.loadFromDisk()
 		}
 	}
 
 	return lk
 }
 
+// fileStoreDir returns the directory for the encrypted file store.
+// Uses XDG_DATA_HOME if set, otherwise ~/.local/share/keychain-auth.
+func fileStoreDir() string {
+	if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
+		return filepath.Join(xdg, "keychain-auth")
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".local", "share", "keychain-auth")
+}
+
 func (lk *LinuxKeychain) Read(service, target string) (string, error) {
-	if lk.useInMemoryBackend {
+	if lk.useFileBackend {
+		lk.mu.Lock()
+		defer lk.mu.Unlock()
+
 		key := service + ":" + target
-		if val, ok := lk.memRead(key); ok {
+		if val, ok := lk.cache[key]; ok {
 			return val, nil
 		}
-		return "", fmt.Errorf("secret not found in memory: %s", key)
+		return "", ErrNotFound
 	}
-	return gokeyring.Get(service, target)
+
+	val, err := gokeyring.Get(service, target)
+	if err != nil {
+		if err == gokeyring.ErrNotFound {
+			return "", ErrNotFound
+		}
+		return "", err
+	}
+	return val, nil
 }
 
 func (lk *LinuxKeychain) Write(service, target, value string) error {
-	if lk.useInMemoryBackend {
-		lk.memWrite(service+":"+target, value)
-		return nil
+	if lk.useFileBackend {
+		lk.mu.Lock()
+		defer lk.mu.Unlock()
+
+		key := service + ":" + target
+		lk.cache[key] = value
+		return lk.persistToDisk()
 	}
 	return gokeyring.Set(service, target, value)
 }
 
 func (lk *LinuxKeychain) Delete(service, target string) error {
-	if lk.useInMemoryBackend {
-		if ok := lk.memDelete(service + ":" + target); !ok {
+	if lk.useFileBackend {
+		lk.mu.Lock()
+		defer lk.mu.Unlock()
+
+		key := service + ":" + target
+		if _, ok := lk.cache[key]; !ok {
 			return fmt.Errorf("secret not found: %s:%s", service, target)
 		}
-		return nil
+		delete(lk.cache, key)
+		return lk.persistToDisk()
 	}
 	return gokeyring.Delete(service, target)
 }
 
 func (lk *LinuxKeychain) Search(service string) ([]string, error) {
-	if lk.useInMemoryBackend {
-		return lk.memSearch(service + ":"), nil
+	if lk.useFileBackend {
+		lk.mu.Lock()
+		defer lk.mu.Unlock()
+
+		prefix := service + ":"
+		var targets []string
+		for k := range lk.cache {
+			if strings.HasPrefix(k, prefix) {
+				targets = append(targets, strings.TrimPrefix(k, prefix))
+			}
+		}
+		return targets, nil
 	}
 	return lk.dbusSearch(service)
 }
 
-// --- In-Memory Helper Methods ---
+// --- Encrypted File Store ---
 
-func (lk *LinuxKeychain) memRead(key string) (string, bool) {
-	lk.dbMu.Lock()
-	defer lk.dbMu.Unlock()
-	val, ok := lk.db[key]
-	return val, ok
-}
-
-func (lk *LinuxKeychain) memWrite(key, value string) {
-	lk.dbMu.Lock()
-	defer lk.dbMu.Unlock()
-	lk.db[key] = value
-}
-
-func (lk *LinuxKeychain) memDelete(key string) bool {
-	lk.dbMu.Lock()
-	defer lk.dbMu.Unlock()
-	if _, ok := lk.db[key]; !ok {
-		return false
+// getOrCreateKey loads the AES-256 key from disk, or generates one on first use.
+func (lk *LinuxKeychain) getOrCreateKey() ([]byte, error) {
+	data, err := os.ReadFile(lk.keyPath)
+	if err == nil && len(data) == 32 {
+		return data, nil
 	}
-	delete(lk.db, key)
-	return true
+
+	// Generate a new 256-bit key
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+		return nil, fmt.Errorf("generate encryption key: %w", err)
+	}
+
+	if err := os.WriteFile(lk.keyPath, key, 0600); err != nil {
+		return nil, fmt.Errorf("write encryption key: %w", err)
+	}
+	return key, nil
 }
 
-func (lk *LinuxKeychain) memSearch(prefix string) []string {
-	lk.dbMu.Lock()
-	defer lk.dbMu.Unlock()
-	var targets []string
-	for k := range lk.db {
-		if strings.HasPrefix(k, prefix) {
-			targets = append(targets, strings.TrimPrefix(k, prefix))
-		}
+// persistToDisk encrypts the cache map and writes it to disk atomically.
+// Caller must hold lk.mu.
+func (lk *LinuxKeychain) persistToDisk() error {
+	key, err := lk.getOrCreateKey()
+	if err != nil {
+		return err
 	}
-	return targets
+
+	plaintext, err := json.Marshal(lk.cache)
+	if err != nil {
+		return fmt.Errorf("marshal keychain data: %w", err)
+	}
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return fmt.Errorf("create cipher: %w", err)
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return fmt.Errorf("create GCM: %w", err)
+	}
+
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return fmt.Errorf("generate nonce: %w", err)
+	}
+
+	ciphertext := gcm.Seal(nonce, nonce, plaintext, nil)
+
+	// Atomic write: write to temp file, then rename
+	tmpPath := lk.storePath + ".tmp"
+	if err := os.WriteFile(tmpPath, ciphertext, 0600); err != nil {
+		return fmt.Errorf("write temp store: %w", err)
+	}
+	if err := os.Rename(tmpPath, lk.storePath); err != nil {
+		return fmt.Errorf("rename temp store: %w", err)
+	}
+
+	return nil
+}
+
+// loadFromDisk decrypts the store file and returns the data map.
+// Returns an empty map if the file doesn't exist or can't be read.
+func (lk *LinuxKeychain) loadFromDisk() map[string]string {
+	result := make(map[string]string)
+
+	ciphertext, err := os.ReadFile(lk.storePath)
+	if err != nil {
+		return result // No store yet — clean start
+	}
+
+	key, err := os.ReadFile(lk.keyPath)
+	if err != nil || len(key) != 32 {
+		return result // No key — can't decrypt, clean start
+	}
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return result
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return result
+	}
+
+	nonceSize := gcm.NonceSize()
+	if len(ciphertext) < nonceSize {
+		return result
+	}
+
+	nonce, ciphertext := ciphertext[:nonceSize], ciphertext[nonceSize:]
+	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return result // Decryption failed — corrupted or key mismatch, clean start
+	}
+
+	if err := json.Unmarshal(plaintext, &result); err != nil {
+		return make(map[string]string)
+	}
+
+	return result
 }
 
 // --- D-Bus search logic ---

@@ -19,9 +19,15 @@ type RegisteredBinary struct {
 	CanSearch            bool     `json:"can_search"`
 }
 
+type TrustedSigner struct {
+	Service   string `json:"service"`
+	PublicKey string `json:"public_key"` // Base64 Ed25519 Public Key
+}
+
 type Config struct {
 	RegisteredBinaries []RegisteredBinary `json:"registered_binaries"`
 	ProtocolVersion    string             `json:"protocol_version,omitempty"`
+	TrustedSigners     []TrustedSigner    `json:"trusted_signers,omitempty"`
 }
 
 // Load reads the config file from disk. If it doesn't exist, returns an empty config.

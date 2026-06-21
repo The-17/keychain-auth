@@ -6,10 +6,12 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -30,6 +32,11 @@ type LinuxKeychain struct {
 func New() *LinuxKeychain {
 	lk := &LinuxKeychain{}
 
+	// Always initialize keyPath so it is available for encryption/decryption
+	storeDir := fileStoreDir()
+	lk.keyPath = filepath.Join(storeDir, "keychain.key")
+	_ = os.MkdirAll(storeDir, 0700)
+
 	if runtime.GOOS == "linux" {
 		needsFileBackend := false
 
@@ -43,12 +50,7 @@ func New() *LinuxKeychain {
 
 		if needsFileBackend {
 			lk.useFileBackend = true
-			storeDir := fileStoreDir()
 			lk.storePath = filepath.Join(storeDir, "keychain.enc")
-			lk.keyPath = filepath.Join(storeDir, "keychain.key")
-
-			// Ensure store directory exists with strict permissions
-			_ = os.MkdirAll(storeDir, 0700)
 
 			// Load existing data from disk
 			lk.cache = lk.loadFromDisk()
@@ -80,14 +82,19 @@ func (lk *LinuxKeychain) Read(service, target string) (string, error) {
 		return "", ErrNotFound
 	}
 
-	val, err := gokeyring.Get(service, target)
+	encryptedVal, err := gokeyring.Get(service, target)
 	if err != nil {
 		if err == gokeyring.ErrNotFound {
 			return "", ErrNotFound
 		}
 		return "", err
 	}
-	return val, nil
+
+	decryptedVal, err := lk.decrypt(encryptedVal)
+	if err != nil {
+		return "", fmt.Errorf("decrypt value from keyring: %w", err)
+	}
+	return decryptedVal, nil
 }
 
 func (lk *LinuxKeychain) Write(service, target, value string) error {
@@ -99,7 +106,12 @@ func (lk *LinuxKeychain) Write(service, target, value string) error {
 		lk.cache[key] = value
 		return lk.persistToDisk()
 	}
-	return gokeyring.Set(service, target, value)
+
+	encryptedVal, err := lk.encrypt(value)
+	if err != nil {
+		return fmt.Errorf("encrypt value for keyring: %w", err)
+	}
+	return gokeyring.Set(service, target, encryptedVal)
 }
 
 func (lk *LinuxKeychain) Delete(service, target string) error {
@@ -134,10 +146,220 @@ func (lk *LinuxKeychain) Search(service string) ([]string, error) {
 	return lk.dbusSearch(service)
 }
 
-// --- Encrypted File Store ---
+// --- Encrypt / Decrypt helpers for Keyring payloads ---
 
-// getOrCreateKey loads the AES-256 key from disk, or generates one on first use.
+func (lk *LinuxKeychain) encrypt(plaintext string) (string, error) {
+	key, err := lk.getOrCreateKey()
+	if err != nil {
+		return "", err
+	}
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", err
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return "", err
+	}
+
+	ciphertext := gcm.Seal(nonce, nonce, []byte(plaintext), nil)
+	return base64.StdEncoding.EncodeToString(ciphertext), nil
+}
+
+func (lk *LinuxKeychain) decrypt(encodedCiphertext string) (string, error) {
+	ciphertext, err := base64.StdEncoding.DecodeString(encodedCiphertext)
+	if err != nil {
+		return "", fmt.Errorf("decode base64 ciphertext: %w", err)
+	}
+
+	key, err := lk.getOrCreateKey()
+	if err != nil {
+		return "", err
+	}
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return "", err
+	}
+
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+
+	nonceSize := gcm.NonceSize()
+	if len(ciphertext) < nonceSize {
+		return "", fmt.Errorf("ciphertext too short")
+	}
+
+	nonce, ciphertextBytes := ciphertext[:nonceSize], ciphertext[nonceSize:]
+	plaintext, err := gcm.Open(nil, nonce, ciphertextBytes, nil)
+	if err != nil {
+		return "", fmt.Errorf("decrypt GCM open: %w", err)
+	}
+
+	return string(plaintext), nil
+}
+
+// --- WSL / TPM2 / File Key Storage Detection & Logic ---
+
+func isWSL() bool {
+	if os.Getenv("WSL_DISTRO_NAME") != "" {
+		return true
+	}
+	data, err := os.ReadFile("/proc/sys/kernel/osrelease")
+	if err == nil {
+		content := strings.ToLower(string(data))
+		if strings.Contains(content, "microsoft") || strings.Contains(content, "wsl") {
+			return true
+		}
+	}
+	return false
+}
+
+func getWindowsUserProfile() string {
+	cmd := exec.Command("cmd.exe", "/c", "echo %USERPROFILE%")
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	winPath := strings.TrimSpace(string(out))
+	if winPath == "" {
+		return ""
+	}
+
+	wslpathCmd := exec.Command("wslpath", "-u", winPath)
+	wslPathBytes, err := wslpathCmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(wslPathBytes))
+}
+
+func runKeychainHelper(args ...string) (string, error) {
+	paths := []string{"keychain-helper.exe"}
+	if userProfile := getWindowsUserProfile(); userProfile != "" {
+		paths = append(paths, filepath.Join(userProfile, ".config", "keychain-auth", "keychain-helper.exe"))
+		paths = append(paths, filepath.Join(userProfile, "AppData", "Local", "keychain-auth", "keychain-helper.exe"))
+	}
+
+	var lastErr error
+	for _, p := range paths {
+		cmd := exec.Command(p, args...)
+		out, err := cmd.Output()
+		if err == nil {
+			return strings.TrimSpace(string(out)), nil
+		}
+		lastErr = err
+	}
+	return "", fmt.Errorf("failed to execute keychain-helper.exe: %w", lastErr)
+}
+
+func hasTPM2() bool {
+	if _, err := os.Stat("/dev/tpm0"); os.IsNotExist(err) {
+		return false
+	}
+	_, err := exec.LookPath("tpm2_unseal")
+	return err == nil
+}
+
+func tpm2Seal(key []byte, pubPath, privPath string) error {
+	tmpDir, err := os.MkdirTemp("", "keychain-tpm-*")
+	if err != nil {
+		return fmt.Errorf("create temp dir: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	primaryCtx := filepath.Join(tmpDir, "primary.ctx")
+	keyRaw := filepath.Join(tmpDir, "key.raw")
+
+	if err := os.WriteFile(keyRaw, key, 0600); err != nil {
+		return fmt.Errorf("write raw key: %w", err)
+	}
+
+	cmd := exec.Command("tpm2_createprimary", "-C", "o", "-g", "sha256", "-G", "rsa", "-c", primaryCtx)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("tpm2_createprimary failed: %s: %w", string(out), err)
+	}
+
+	cmd = exec.Command("tpm2_create", "-C", primaryCtx, "-u", pubPath, "-r", privPath, "-i", keyRaw)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("tpm2_create failed: %s: %w", string(out), err)
+	}
+
+	return nil
+}
+
+func tpm2Unseal(pubPath, privPath string) ([]byte, error) {
+	tmpDir, err := os.MkdirTemp("", "keychain-tpm-*")
+	if err != nil {
+		return nil, fmt.Errorf("create temp dir: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	primaryCtx := filepath.Join(tmpDir, "primary.ctx")
+	keyCtx := filepath.Join(tmpDir, "key.ctx")
+
+	cmd := exec.Command("tpm2_createprimary", "-C", "o", "-g", "sha256", "-G", "rsa", "-c", primaryCtx)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return nil, fmt.Errorf("tpm2_createprimary failed: %s: %w", string(out), err)
+	}
+
+	cmd = exec.Command("tpm2_load", "-C", primaryCtx, "-u", pubPath, "-r", privPath, "-c", keyCtx)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return nil, fmt.Errorf("tpm2_load failed: %s: %w", string(out), err)
+	}
+
+	cmd = exec.Command("tpm2_unseal", "-c", keyCtx)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("tpm2_unseal failed: %w", err)
+	}
+
+	return out, nil
+}
+
+// getOrCreateKey loads the AES-256 key, using WSL host interop, TPM2, or local file fallback.
 func (lk *LinuxKeychain) getOrCreateKey() ([]byte, error) {
+	if isWSL() {
+		base64Key, err := runKeychainHelper("get")
+		if err != nil {
+			return nil, fmt.Errorf("WSL key interop: %w", err)
+		}
+		key, err := base64.StdEncoding.DecodeString(base64Key)
+		if err != nil || len(key) != 32 {
+			return nil, fmt.Errorf("invalid key returned from Windows host helper: %w", err)
+		}
+		return key, nil
+	}
+
+	if hasTPM2() {
+		pubPath := lk.keyPath + ".pub"
+		privPath := lk.keyPath + ".priv"
+		if _, err := os.Stat(pubPath); err == nil {
+			key, err := tpm2Unseal(pubPath, privPath)
+			if err == nil && len(key) == 32 {
+				return key, nil
+			}
+		}
+
+		key := make([]byte, 32)
+		if _, err := io.ReadFull(rand.Reader, key); err != nil {
+			return nil, fmt.Errorf("generate random key: %w", err)
+		}
+		if err := tpm2Seal(key, pubPath, privPath); err != nil {
+			return nil, fmt.Errorf("seal key to TPM2: %w", err)
+		}
+		return key, nil
+	}
+
 	data, err := os.ReadFile(lk.keyPath)
 	if err == nil && len(data) == 32 {
 		return data, nil
@@ -207,7 +429,7 @@ func (lk *LinuxKeychain) loadFromDisk() map[string]string {
 		return result // No store yet — clean start
 	}
 
-	key, err := os.ReadFile(lk.keyPath)
+	key, err := lk.getOrCreateKey()
 	if err != nil || len(key) != 32 {
 		return result // No key — can't decrypt, clean start
 	}
@@ -227,8 +449,8 @@ func (lk *LinuxKeychain) loadFromDisk() map[string]string {
 		return result
 	}
 
-	nonce, ciphertext := ciphertext[:nonceSize], ciphertext[nonceSize:]
-	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
+	nonce, ciphertextBytes := ciphertext[:nonceSize], ciphertext[nonceSize:]
+	plaintext, err := gcm.Open(nil, nonce, ciphertextBytes, nil)
 	if err != nil {
 		return result // Decryption failed — corrupted or key mismatch, clean start
 	}

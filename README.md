@@ -12,9 +12,10 @@ Native keychains have major security gaps for local development and CLI utilitie
 1.  **No Process Sandboxing on Linux/Windows:** Any script, curl piped to bash, or compromised package dependency (npm/pip/cargo) running under your user account can query D-Bus (`org.freedesktop.secrets`) or DPAPI (`CredRead`) to read all your credentials (AWS keys, OpenAI tokens, database passwords) without your knowledge.
 2.  **macOS Prompt Fatigue:** Command-line tools lack application bundles and signatures, triggering constant macOS SecurityAgent permission dialogs. This leads to users clicking "Always Allow," exposing keys to any CLI invocation.
 
-`keychain-auth` fixes these flaws:
+`keychain-auth` v3 establishes a secure boundary centered on **Process Anti-Impersonation**:
 *   **Kernel-Level Process Verification (Spoof-Proof):** The daemon retrieves the caller's actual PID using kernel-enforced connection options (`SO_PEERCRED` on Linux, `LOCAL_PEERPID` on macOS, and named pipe verification on Windows). Self-reported PIDs are ignored.
-*   **Cryptographic Attestation:** It resolves the executable path of the caller and computes its SHA-256 binary hash, checking it against a database of user-approved hashes. Active processes are protected from in-place tampering by the OS (`ETXTBSY`), making long-lived connections secure.
+*   **Cryptographic Attestation & Lineage Auditing:** It resolves the executable path of the caller, verifies its parent/child process tree, and computes its SHA-256 binary hash, checking it against a database of user-approved hashes. Active processes are protected from in-place tampering by the OS (`ETXTBSY`), making long-lived connections secure.
+*   **Zero-Trust Developer Code Signing (Ed25519):** To eliminate update fatigue while preserving zero-trust integrity, v3 introduces developer code signing. If a client binary is updated (changing its SHA-256 hash), the daemon uses Go-native Ed25519 asymmetric signature verification (checking the final bytes of the binary) to validate it. If signed by a trusted developer key, the daemon silently auto-registers the new hash and allows access without triggering user alerts or sudo elevations.
 *   **Zero-Trust Access Control:** Registered binaries are restricted to explicit read and write service namespaces. A compromised read-only binary cannot overwrite or poison secrets. Destructive operations like `delete` explicitly require the target service to be in the binary's `allowed_write_services`.
 *   **Unified Search & Query Interface:** Solves the lack of a cross-platform, clean search API. Applications can securely filter, list, and retrieve keys based on custom attributes.
 
@@ -48,12 +49,11 @@ Clients connect to the daemon over:
 2.  **Protocol Sanity Check (PING):** The client sends a search request (`Type: "REQUEST", Action: "search"`) as a protocol check to verify the daemon is responsive and supports the JSON protocol.
 3.  **Request Handling:** Once validated, the connection is bound as the authenticated session. The client can then execute request payloads.
 
-### GCM-Encrypted File Fallback
-In headless environments, WSL, or systems where standard desktop keyrings (GNOME Keyring/KWallet/D-Bus) are absent:
-*   `keychain-auth` implements an automated fallback to an AES-256-GCM encrypted file store.
-*   Data is written to `keychain.enc` inside the platform-appropriate directory (e.g. `~/.local/share/keychain-auth/`).
-*   The AES key is kept inside `keychain.key` with strict user-only read permissions (`0600`).
-*   This preserves the Zero-Disk-Plaintext security guarantee, preventing raw credentials from being written to disk files.
+### GCM-Encrypted File Fallback (Secure Key Persistence)
+In headless environments, WSL, or systems where standard desktop keyrings (GNOME Keyring/KWallet/D-Bus) are absent, `keychain-auth` falls back to an AES-256-GCM encrypted file store (`keychain.enc`). The master 256-bit encryption key is managed securely using the following hardened mechanisms:
+*   **WSL Host Interop (Zero Linux Disk Footprint):** If running inside WSL, the daemon never writes the master key to the Linux filesystem. Instead, it delegates storage to the Windows Host's native Credential Manager using a lightweight helper tool (`keychain-helper.exe`) via WSL execution interop, fetching the key dynamically into memory.
+*   **TPM2 Key Sealing:** If a local TPM2 chip is available (`/dev/tpm0` on Linux), the daemon seals the master key directly to the TPM hardware registers (`tpm2_create` -> `tpm2_load` -> `tpm2_unseal`). The key cannot be extracted or copied by malware.
+*   **Strict POSIX Fallback:** If neither TPM2 nor WSL interop is available, the key is written locally with strict `0600` permissions as a last resort.
 
 ---
 
@@ -111,6 +111,7 @@ Requests are **all-or-nothing**. The daemon evaluates all requested `targets` ag
 ## Installation & CLI Commands
 
 ```bash
+keychain-auth install             # Setup system sandbox (user, group, systemd, etc. - Linux only, requires sudo)
 keychain-auth start               # Start the security daemon
 keychain-auth list-pending        # List binaries currently waiting for authorization
 keychain-auth approve <hash>      # Authorize a pending binary (defaults to 0 privileges)

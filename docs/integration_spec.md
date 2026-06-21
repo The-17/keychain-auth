@@ -207,3 +207,46 @@ If a parent process forks and executes an untrusted command, the child process i
     keychain-auth daemon is not running.
     Please start it manually with: keychain-auth start
     ```
+
+---
+
+## 6. Advanced Security: Developer Code Signature Verification
+
+To support seamless binary upgrades without triggering `sudo` or elevation registration prompts, `keychain-auth` supports cryptographic Developer Code Signature Verification.
+
+Instead of matching static SHA-256 binary hashes in `/config.json`, the daemon validates an asymmetric signature embedded at the end of the client executable.
+
+### 6.1 The Binary Signature Layout
+Clients append their signature block to the compiled binary file:
+```
+┌─────────────────────────────────┬────────────────────────────┬─────────────────────┐
+│      Original Executable        │     Ed25519 Signature      │     Magic Bytes     │
+│             Data                │         (64 bytes)         │      (4 bytes)      │
+└─────────────────────────────────┴────────────────────────────┴─────────────────────┘
+                                  ◄─────────────── 68 bytes ─────────────────────────►
+```
+*   **Signature (64 bytes):** The Ed25519 signature computed over the SHA-256 hash of the original executable data.
+*   **Magic Bytes (4 bytes):** The static byte sequence `0x4B 0x43 0x41 0x53` (ASCII: `KCAS` - Keychain Auth Signature).
+
+### 6.2 Signer Configuration (Daemon)
+To allow a signed binary, the developer's public key must be registered under the service namespace inside `/config.json`:
+```json
+{
+  "trusted_signers": [
+    {
+      "service": "AgentSecrets",
+      "public_key": "MCowBQYDK2VwAyEAf2v... (Base64 Ed25519 Public Key)"
+    }
+  ]
+}
+```
+
+### 6.3 Verification Flow
+When a signed client connects:
+1.  The daemon resolves the executable path via the peer PID.
+2.  It opens the executable file and checks the final 4 bytes for the `KCAS` magic bytes.
+3.  If present, it extracts the preceding 64 bytes as the signature.
+4.  It hashes the executable file from byte `0` up to `file_size - 68` (excluding the signature block).
+5.  It verifies the signature against this hash using the registered `public_key`.
+6.  If the signature is valid, the connection is accepted silently, skipping the static `/config.json` hash registry check.
+

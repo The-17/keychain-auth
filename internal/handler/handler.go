@@ -90,29 +90,78 @@ func (h *Handler) Handle(conn net.Conn) {
 	// 5. Look up binary hash in config
 	binaryPolicy := cfg.FindByHash(fileHash)
 	if binaryPolicy == nil || binaryPolicy.Path != osPath {
-		// Log unregistered attempt to pending.json
-		cmdLine, _ := h.verifier.ResolveCommandLine(pid)
-		if err := h.pending.Add(osPath, fileHash, cmdLine); err != nil {
-			log.Printf("ERROR: failed to add pending attempt: %v", err)
+		// Code Signature Verification Check
+		var matchedSigner *config.TrustedSigner
+		for i := range cfg.TrustedSigners {
+			signer := &cfg.TrustedSigners[i]
+			ok, err := verify.VerifySignature(osPath, signer.PublicKey)
+			if err == nil && ok {
+				matchedSigner = signer
+				break
+			}
 		}
 
-		reason := protocol.ReasonUnregisteredBinaryPendingApproval
-		_ = h.audit.Log(audit.Event{
-			Action:     "connect",
-			PID:        pid,
-			BinaryPath: osPath,
-			BinaryHash: fileHash,
-			Result:     "DENIED",
-			Reason:     string(reason),
-		})
+		if matchedSigner != nil {
+			// Binary is signed by a trusted developer key!
+			// Auto-approve and auto-register/update the policy.
+			log.Printf("INFO: auto-approving connection for signed binary: %s", osPath)
 
-		// Graceful rejection message before closing socket
-		_ = enc.Write(protocol.Response{
-			Type:   protocol.TypeResponse,
-			Status: "denied",
-			Reason: reason,
-		})
-		return
+			// Find existing policy by path
+			var pathPolicy *config.RegisteredBinary
+			for i := range cfg.RegisteredBinaries {
+				if cfg.RegisteredBinaries[i].Path == osPath {
+					pathPolicy = &cfg.RegisteredBinaries[i]
+					break
+				}
+			}
+
+			if pathPolicy != nil {
+				// Update hash in memory
+				pathPolicy.Hash = fileHash
+				binaryPolicy = pathPolicy
+			} else {
+				// Create new policy with access to the signed service
+				newPolicy := config.RegisteredBinary{
+					Path:                 osPath,
+					Hash:                 fileHash,
+					RegisteredAt:         time.Now().UTC().Format(time.RFC3339),
+					AllowedReadServices:  []string{matchedSigner.Service},
+					AllowedWriteServices: []string{matchedSigner.Service},
+					CanSearch:            true, // Allow search for its own service
+				}
+				cfg.RegisteredBinaries = append(cfg.RegisteredBinaries, newPolicy)
+				binaryPolicy = &cfg.RegisteredBinaries[len(cfg.RegisteredBinaries)-1]
+			}
+
+			// Save the updated configuration to disk
+			if err := cfg.Save(config.ConfigPath()); err != nil {
+				log.Printf("ERROR: failed to save config after signature auto-registration: %v", err)
+			}
+		} else {
+			// Log unregistered attempt to pending.json
+			cmdLine, _ := h.verifier.ResolveCommandLine(pid)
+			if err := h.pending.Add(osPath, fileHash, cmdLine); err != nil {
+				log.Printf("ERROR: failed to add pending attempt: %v", err)
+			}
+
+			reason := protocol.ReasonUnregisteredBinaryPendingApproval
+			_ = h.audit.Log(audit.Event{
+				Action:     "connect",
+				PID:        pid,
+				BinaryPath: osPath,
+				BinaryHash: fileHash,
+				Result:     "DENIED",
+				Reason:     string(reason),
+			})
+
+			// Graceful rejection message before closing socket
+			_ = enc.Write(protocol.Response{
+				Type:   protocol.TypeResponse,
+				Status: "denied",
+				Reason: reason,
+			})
+			return
+		}
 	}
 
 	// Log successful connection

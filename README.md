@@ -1,149 +1,85 @@
-# keychain-auth
+# keychain-auth v3
 
-`keychain-auth` is a low-level, high-security gatekeeper and intermediary proxy for operating system keychains (macOS Keychain, Linux Secret Service, Windows Credential Manager). 
+`keychain-auth` is a hardened, process-isolated **Zero-Trust Security Broker** for operating system keychains (macOS Keychain, Linux Secret Service/D-Bus, and Windows Credential Manager). 
 
-It acts as a secure local broker for command-line tools and local applications. Instead of applications directly querying the keychain (which lacks process verification on Linux/Windows and suffers from prompt fatigue on macOS), applications query `keychain-auth` over a secure local channel. The daemon validates the caller's process identity using kernel-level peer credentials and executes fine-grained access control policies.
-
----
-
-## Why Use It? (Security Enhancements)
-
-Native keychains have major security gaps for local development and CLI utilities:
-1.  **No Process Sandboxing on Linux/Windows:** Any script, curl piped to bash, or compromised package dependency (npm/pip/cargo) running under your user account can query D-Bus (`org.freedesktop.secrets`) or DPAPI (`CredRead`) to read all your credentials (AWS keys, OpenAI tokens, database passwords) without your knowledge.
-2.  **macOS Prompt Fatigue:** Command-line tools lack application bundles and signatures, triggering constant macOS SecurityAgent permission dialogs. This leads to users clicking "Always Allow," exposing keys to any CLI invocation.
-
-`keychain-auth` v3 establishes a secure boundary centered on **Process Anti-Impersonation**:
-*   **Kernel-Level Process Verification (Spoof-Proof):** The daemon retrieves the caller's actual PID using kernel-enforced connection options (`SO_PEERCRED` on Linux, `LOCAL_PEERPID` on macOS, and named pipe verification on Windows). Self-reported PIDs are ignored.
-*   **Cryptographic Attestation & Lineage Auditing:** It resolves the executable path of the caller, verifies its parent/child process tree, and computes its SHA-256 binary hash, checking it against a database of user-approved hashes. Active processes are protected from in-place tampering by the OS (`ETXTBSY`), making long-lived connections secure.
-*   **Zero-Trust Developer Code Signing (Ed25519):** To eliminate update fatigue while preserving zero-trust integrity, v3 introduces developer code signing. If a client binary is updated (changing its SHA-256 hash), the daemon uses Go-native Ed25519 asymmetric signature verification (checking the final bytes of the binary) to validate it. If signed by a trusted developer key, the daemon silently auto-registers the new hash and allows access without triggering user alerts or sudo elevations.
-*   **Zero-Trust Access Control:** Registered binaries are restricted to explicit read and write service namespaces. A compromised read-only binary cannot overwrite or poison secrets. Destructive operations like `delete` explicitly require the target service to be in the binary's `allowed_write_services`.
-*   **Unified Search & Query Interface:** Solves the lack of a cross-platform, clean search API. Applications can securely filter, list, and retrieve keys based on custom attributes.
-
-### ⚠️ Security Contract: The `O_CLOEXEC` Requirement
-If a parent process forks and executes an untrusted binary, the child inherits open file descriptors by default. The daemon cannot detect this. To prevent session hijacking across `exec()`, **clients must ensure the socket is opened with the `O_CLOEXEC` flag.** (The official client SDK handles this automatically).
+It acts as a secure local gatekeeper for command-line tools and local applications. Instead of applications directly querying OS keychains (which lack process verification on Linux/Windows and suffer from prompt fatigue on macOS), applications query `keychain-auth` over a secure local IPC channel. The daemon validates the caller's process identity using kernel-level peer credentials, audits their cryptographic signatures, and enforces fine-grained access control policies.
 
 ---
 
-## The Audit Log (Observability Pillar)
-A core benefit of `keychain-auth` is granular, local observability. Every approved request, denied request, and search operation is written to a structured JSON audit log at `~/.local/share/keychain-auth/audit.log` (or `Library/Logs` on macOS).
-Because searches return targets only, fetching secret values requires explicit `read` requests. This guarantees the audit log captures granular, per-secret access records rather than opaque "search granted" entries, severely limiting the blast-radius of compromised binaries.
+## 📖 Project Documentation Manuals
+
+The codebase contains detailed manuals and specifications. If you are integrating a CLI tool (like `agentsecrets`) or building a client SDK, refer to these guides:
+
+*   📘 **[The Master Architecture & Client Integration Book](file:///Ubuntu/home/theapiartist/work/keychain-auth/docs/architecture_and_integration_guide.md)**: Deep dive into threat models, kernel transport layers, and step-by-step client implementations in Go, Python, and Node.js.
+*   📜 **[JSON Wire Protocol Integration Specification](file:///Ubuntu/home/theapiartist/work/keychain-auth/docs/integration_spec.md)**: Canonical reference for wire protocol request/response schemas, match types, and blast-radius limits.
+*   🔑 **[Developer Code Signing & CI/CD Tutorial](file:///Ubuntu/home/theapiartist/work/keychain-auth/docs/ci_cd_signing_tutorial.md)**: Tutorial on how to configure Ed25519 signing keys, sign executables, and integrate validation into automated release pipelines.
+*   💻 **[CLI Commands & Administration Tutorial](file:///Ubuntu/home/theapiartist/work/keychain-auth/docs/tutorial.md)**: End-user manual detailing the daemon commands, approval queues, and policy configurations.
 
 ---
 
-## How It Works (Protocol Architecture)
+## 🛡️ Core Security Pillars (Why keychain-auth?)
 
-```
-┌──────────────────┐      Local Socket      ┌──────────────────┐     Native API     ┌──────────────┐
-│  Client Application │ ◄──────────────────► │  keychain-auth   │ ◄────────────────►│  OS Keychain │
-│  (e.g., CLI, app)   │   JSON-over-socket   │  (Security Daemon)│    (Read/Write)   │  (Storage)   │
-└──────────────────┘                        └──────────────────┘                   └──────────────┘
-```
+Native operating system keychains were designed for a legacy desktop era and contain significant security vulnerabilities for modern developers, CLIs, and automated workflows. `keychain-auth` introduces a hardened security boundary:
 
-### IPC Channel Specification
-Clients connect to the daemon over:
-*   **macOS / Linux**: Unix domain socket at `~/.config/keychain-auth/keychain-auth.sock`.
-*   **Windows**: Named Pipe at `\\.\pipe\keychain-auth`.
+### 1. Process Anti-Impersonation (Spoof-Proof Identity)
+*   **The Problem:** On Linux and Windows, any script, curl piped to bash, or compromised dependency (npm/pip/cargo) running under your user account can query D-Bus (`org.freedesktop.secrets`) or DPAPI (`CredRead`) to read all your plaintext credentials without your knowledge or consent.
+*   **The Solution:** `keychain-auth` verifies callers using kernel-enforced connection credentials. The daemon queries the IPC socket using OS-level transport structures (`SO_PEERCRED` on Linux, `LOCAL_PEERPID` on macOS, and pipe client process validation on Windows). Self-reported PIDs are completely ignored, preventing spoofing.
 
-### Connection Handshake Probe
-1.  **Connection Initiation:** The client opens the IPC channel. Since the daemon verifies the caller's PID/binary hash immediately upon connection, the client *must* set a short read deadline (e.g., 50ms) and check for an immediate `RESPONSE` status of `"denied"`. If the connection is dropped or a denial is received, the client fails. If the probe times out without a message, the client clears the deadline and assumes connection acceptance.
-2.  **Protocol Sanity Check (PING):** The client sends a search request (`Type: "REQUEST", Action: "search"`) as a protocol check to verify the daemon is responsive and supports the JSON protocol.
-3.  **Request Handling:** Once validated, the connection is bound as the authenticated session. The client can then execute request payloads.
+### 2. Cryptographic Binary Attestation & Code Signing (v3)
+*   **The Problem:** Developers update their CLI tools frequently. When a binary is updated, its SHA-256 hash changes. Requiring manual approval or elevated permissions on every minor update causes prompt fatigue, leading users to compromise security.
+*   **The Solution:** Version 3 introduces native **Ed25519 Developer Code Signature Verification**. By appending a 64-byte cryptographic signature and magic bytes (`KCAS`) to the compiled binary, the daemon verifies that the binary was built by a trusted developer. If the signature matches a trusted public key registered in `config.json`, the daemon auto-registers the new binary hash and grants access silently—providing seamless upgrades with absolute integrity.
 
-### GCM-Encrypted File Fallback (Secure Key Persistence)
-In headless environments, WSL, or systems where standard desktop keyrings (GNOME Keyring/KWallet/D-Bus) are absent, `keychain-auth` falls back to an AES-256-GCM encrypted file store (`keychain.enc`). The master 256-bit encryption key is managed securely using the following hardened mechanisms:
-*   **WSL Host Interop (Zero Linux Disk Footprint):** If running inside WSL, the daemon never writes the master key to the Linux filesystem. Instead, it delegates storage to the Windows Host's native Credential Manager using a lightweight helper tool (`keychain-helper.exe`) via WSL execution interop, fetching the key dynamically into memory.
-*   **TPM2 Key Sealing:** If a local TPM2 chip is available (`/dev/tpm0` on Linux), the daemon seals the master key directly to the TPM hardware registers (`tpm2_create` -> `tpm2_load` -> `tpm2_unseal`). The key cannot be extracted or copied by malware.
-*   **Strict POSIX Fallback:** If neither TPM2 nor WSL interop is available, the key is written locally with strict `0600` permissions as a last resort.
+### 3. Sealed Fallback Key Storage (WSL Host Interop & TPM2)
+*   **The Problem:** Headless servers, Docker containers, and Windows Subsystem for Linux (WSL) lack desktop keyring daemons. Fallbacks that write plaintext keys to files on the VM disk are highly vulnerable to extraction.
+*   **The Solution:** When fallback file storage is required, `keychain-auth` uses state-of-the-art key persistence:
+    *   **WSL Host Interop:** Under WSL, the master encryption key is never written to the Linux filesystem. Instead, `keychain-auth` retrieves the key dynamically from the Windows Host's native Credential Manager using a lightweight Windows helper (`keychain-helper.exe`), leaving zero footprint on the Linux disk.
+    *   **TPM2 Hardware Sealing:** On generic headless Linux systems, if a TPM 2.0 module is present (`/dev/tpm0`), the master key is sealed directly to the hardware TPM platform configuration registers. The key cannot be extracted or copied by malware.
+
+### 4. Zero-Trust Access Control & Namespace Isolation
+*   Registered binaries are restricted to explicit read and write service namespaces (e.g. `openai` or `AgentSecrets`). 
+*   Destructive operations like `delete` explicitly require the service to be in the binary's `allowed_write_services` policy.
+*   Batch queries are strictly atomic: if a client requests multiple keys and a single key fails policy verification, the entire batch is rejected.
 
 ---
 
-## Flexible Batch Query Protocol
+## ⚡ Quick Start
 
-Clients communicate with the daemon using a generalized JSON protocol optimized for batch operations.
-
-### 1. Request Structure (Batch & Prefix Support)
-Clients can request, write, or delete multiple secrets in a single socket round-trip. Using the optional `"match": "prefix"` field, they can perform bulk operations (read/delete) matching target name prefixes.
-```json
-{
-  "type": "REQUEST",
-  "action": "read | write | delete | search",
-  "service": "aws",
-  "match": "exact | prefix",
-  "targets": ["prod-api-key", "prod-db-password"],
-  "values": ["optional-value-for-write-1", "optional-value-for-write-2"],
-  "attributes": {
-    "environment": "production"
-  }
-}
-```
-*Notes:*
-* Write requests enforce strict array alignment: `len(targets)` must exactly match `len(values)`.
-* `"match": "prefix"` is supported for `read`, `delete`, and `search` actions (not allowed for `write`).
-* Prefix reads/deletes require that the binary has `can_search: true` in addition to target service permission.
-
-### 2. Batch Atomicity & Pre-Flight Checks
-Requests are **all-or-nothing**. The daemon evaluates all requested `targets` against the binary's access policy *before* executing any OS keychain operations. If a single target is denied, the entire batch is rejected.
-
-### 3. Response Structure & Blast-Radius Limits
-* **Standard search operations return key targets only, never plaintext secrets.** To fetch their secrets, subsequent explicit `read` requests are required to maintain a secure audit trail.
-* **Prefix reads** (using `"match": "prefix"` with `"action": "read"`) retrieve both the target keys and their actual plaintext values for all matched keys in a single socket roundtrip.
-
-```json
-{
-  "type": "RESPONSE",
-  "status": "success | denied | error",
-  "reason": "unregistered_binary | action_not_in_policy | service_not_allowed | malformed_request",
-  "results": [
-    {
-      "target": "prod-api-key",
-      "value": "secret-value-only-if-authorized-read",
-      "attributes": {
-        "environment": "production"
-      }
-    }
-  ]
-}
-```
-
-
----
-
-## Installation & CLI Commands
-
+### 1. System Installation (Linux/WSL)
+On Linux systems, install the sandboxed daemon using the Go-native install command (requires `sudo` to configure the unprivileged `keychain-auth` system user and register the systemd service):
 ```bash
-keychain-auth install             # Setup system sandbox (user, group, systemd, etc. - Linux only, requires sudo)
-keychain-auth start               # Start the security daemon
-keychain-auth list-pending        # List binaries currently waiting for authorization
-keychain-auth approve <hash>      # Authorize a pending binary (defaults to 0 privileges)
-keychain-auth register <path>     # Directly register a trusted binary path & hash
-keychain-auth upgrade <path>      # Update the registered hash for an updated binary
+sudo keychain-auth install
 ```
 
-### The "Pending Approval" Workflow
-If a drive-by script or unregistered binary attempts to query the proxy, it is dropped gracefully with an `unregistered_binary` reason code. The daemon securely logs its command-line arguments, timestamps, and hash to `~/.config/keychain-auth/pending.json` for 24 hours. The user can inspect the queue using `list-pending` and authorize safe tools via `approve <hash>`.
-
-### Installation Integration (for CLI creators)
-If you are building a CLI tool that integrates with `keychain-auth`, add this to your tool's initialization/setup script:
+### 2. Basic Commands
 ```bash
-keychain-auth register $(which your-cli-tool)
+keychain-auth start               # Start the security daemon in the background
+keychain-auth list-pending        # List binaries waiting for user authorization
+keychain-auth approve <hash>      # Approve a pending binary hash from the queue
+keychain-auth register <path>     # Directly register and configure a trusted binary
+keychain-auth upgrade <path>      # Update the registered hash for a compiled update
 ```
-Since the setup script runs in the user's active shell, it writes the configuration directly to `~/.config/keychain-auth/config.json`. When your tool runs next, it will seamlessly connect.
+
+### 3. The "Pending Approval" Workflow
+If an unregistered binary attempts to query the socket:
+1.  The daemon denies the request with an `unregistered_binary_pending_approval` reason code and drops the socket connection.
+2.  It logs the caller's path, CLI arguments, and SHA-256 hash to a secure local queue (`pending.json`).
+3.  The user runs `keychain-auth list-pending` to inspect the queue, and grants access using `keychain-auth approve <hash>`.
 
 ---
 
-## Platform Support & Backends
+## 📋 Platform Support
 
-| Platform | IPC Mechanism | Verification Backend | Keychain Storage |
+| Platform | IPC Transport | Process Verification | Entitlement Keychain Storage |
 | :--- | :--- | :--- | :--- |
 | **macOS** | Unix Domain Socket | `LOCAL_PEERPID` & Code Signatures | Apple Keychain Services |
 | **Linux** | Unix Domain Socket | `SO_PEERCRED` & `/proc/<pid>/exe` | GNOME Keyring / KWallet (`dbus`) |
-| **Windows**| Named Pipe | `GetNamedPipeClientProcessId` | Windows Credential Manager |
+| **Windows**| Named Pipe | Named Pipe Client PID | Windows Credential Manager |
 
-*Note: Headless Linux systems and WSL environments automatically fall back to a secure file-based storage backend at `~/.keychain-auth/keyring.json`.*
+*Note: Headless systems, WSL, and legacy environments automatically fall back to an AES-256-GCM encrypted database file sealed via TPM2 or Windows Host Interop.*
 
 ---
 
-## Development
+## 🛠️ Development
 
 ```bash
 # Prerequisites: Go 1.24+
@@ -152,6 +88,8 @@ go build -o keychain-auth ./cmd/keychain-auth
 go test ./...
 ```
 
-## License
+---
+
+## 📄 License
 
 MIT — see [LICENSE](LICENSE).

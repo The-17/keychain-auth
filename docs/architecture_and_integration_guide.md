@@ -14,6 +14,7 @@ If you are a developer building integrations (like `agentsecrets` or any other t
 5. [Chapter 5: Step-by-Step Client Implementations (Go, Python, Node.js)](#chapter-5-step-by-step-client-implementations)
 6. [Chapter 6: Daemon Lifecycle & Forensic Auditing](#chapter-6-daemon-lifecycle--forensic-auditing)
 7. [Chapter 7: Production Integration Checklist](#chapter-7-production-integration-checklist)
+8. [Chapter 8: Fallback Key Storage (WSL Host Interop & TPM2 Sealing)](#chapter-8-fallback-key-storage-wsl-host-interop--tpm2-sealing)
 
 ---
 
@@ -774,3 +775,23 @@ When releasing an application or CLI integrated with `keychain-auth`, use this c
   ```
 * [ ] **Use Private Namespaces**: If your tool does not share passwords directly with third-party tools, isolate all secrets under your own, private service namespace (e.g. `AgentSecrets`).
 * [ ] **Prefix Matching for Bulk Discovery**: Avoid reading all secrets into client memory when you only need to list key names. Use search prefix-filtering to display coverage layouts securely.
+
+---
+
+## Chapter 8: Fallback Key Storage (WSL Host Interop & TPM2 Sealing)
+
+In headless environments, WSL, or systems where standard desktop keyrings (GNOME Keyring/KWallet/D-Bus) are absent, `keychain-auth` implements an automated fallback to an AES-256-GCM encrypted file store (`keychain.enc`). The master 256-bit encryption key is managed securely using the following hardened mechanisms:
+
+### 8.1 WSL Host Interop (Zero Linux Disk Footprint)
+When running inside Windows Subsystem for Linux (WSL), storing the master encryption key on the Linux virtual disk exposes it to any local process running in the VM. 
+*   **The Architecture**: Instead of writing the key to the WSL disk, `keychain-auth` delegates key storage to the Windows Host's native **Windows Credential Manager** via execution interop.
+*   **How it Works**: The daemon invokes the Windows helper tool `keychain-helper.exe` to save and read the key dynamically. When `keychain-auth` starts up in WSL, it spawns `keychain-helper.exe get` to fetch the key into memory. The key never touches the WSL filesystem, neutralizing file theft vectors on the Linux VM.
+
+### 8.2 TPM2 Key Sealing
+On standard headless Linux systems where a physical or virtual Trusted Platform Module (TPM 2.0) is present:
+*   **The Architecture**: The daemon seals the master 256-bit encryption key directly to the TPM chip registers.
+*   **How it Works**: The key is generated and sealed to the TPM hardware via native Go or command utilities (`tpm2_create` -> `tpm2_load` -> `tpm2_unseal`). The key can only be decrypted if the system's measurements and boot state match the authorized registers, making physical database/key extraction attacks impossible.
+
+### 8.3 POSIX Fallback
+If neither TPM2 nor WSL interop is available, the daemon falls back to writing the key locally inside the platform-appropriate config folder with strict `0600` permissions. This ensures the daemon remains highly portable and functions on legacy or containerized environments while preferring hardware-backed or host-backed storage when available.
+

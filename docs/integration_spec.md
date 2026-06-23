@@ -57,7 +57,7 @@ Clients initiate operations by sending a generalized `REQUEST` envelope.
 | Field | Type | Description | Mandatory |
 | :--- | :--- | :--- | :--- |
 | `type` | String | Must be exactly `"REQUEST"`. | Yes |
-| `action` | String | Must be `"read"`, `"write"`, `"delete"`, or `"search"`. | Yes |
+| `action` | String | Must be `"read"`, `"write"`, `"delete"`, `"search"`, or `"check"`. | Yes |
 | `service` | String | The service namespace (e.g. `aws`, `openai`, `github`). | Yes |
 | `match` | String | Interpret targets: `"exact"` (default) or `"prefix"`. If `"prefix"`, targets are treated as prefix filters. (Not allowed for `"write"`). | Optional |
 | `targets` | Array of Strings | The key identifiers/accounts being acted upon. For `search` action, this is optional; if specified, they act as prefix filters. | Yes (except for `search`) |
@@ -114,6 +114,7 @@ All requested `targets` are checked against the binary's policy **before any key
 *   `write`: Requires the requested `service` namespace to be listed in `allowed_write_services`.
 *   `delete`: Requires the requested `service` namespace to be listed in `allowed_write_services` (treated as a write-level privilege).
     *   *Note:* If `match` is set to `"prefix"`, the binary **must also** have `can_search: true` since the daemon needs to enumerate keys to resolve prefixes.
+*   `check`: Special check action to verify that a target binary path is registered and fully configured. Does not require specific read/write namespace scopes.
 
 ### 3.3 Search Blast-Radius & Prefix Filtering
 

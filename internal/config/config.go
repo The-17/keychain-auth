@@ -66,6 +66,11 @@ func (c *Config) Save(path string) error {
 	if err := os.WriteFile(tmp, data, 0600); err != nil {
 		return fmt.Errorf("write tmp config: %w", err)
 	}
+
+	if err := applyPermissions(tmp, path); err != nil {
+		// Log or ignore warning, do not block save unless critical
+	}
+
 	return os.Rename(tmp, path)
 }
 

@@ -5,16 +5,17 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"syscall"
 )
 
 func ConfigPath() string {
 	if ConfigPathOverride != "" {
 		return ConfigPathOverride
 	}
-	// Check if the system-wide config exists (dedicated user mode)
-	sysPath := "/etc/keychain-auth/config.json"
-	if _, err := os.Stat(sysPath); err == nil {
-		return sysPath
+	// Check if the system-wide config directory exists (dedicated user mode)
+	sysDir := "/etc/keychain-auth"
+	if _, err := os.Stat(sysDir); err == nil {
+		return filepath.Join(sysDir, "config.json")
 	}
 
 	dir := os.Getenv("XDG_CONFIG_HOME")
@@ -51,4 +52,28 @@ func DefaultSocketPath() string {
 		runtimeDir = filepath.Join(os.Getenv("HOME"), ".cache")
 	}
 	return filepath.Join(runtimeDir, "keychain-auth", "agent.sock")
+}
+
+func applyPermissions(tmpPath, targetPath string) error {
+	var uid, gid int = -1, -1
+	var mode os.FileMode = 0600
+	if info, err := os.Stat(targetPath); err == nil {
+		mode = info.Mode().Perm()
+		if statT, ok := info.Sys().(*syscall.Stat_t); ok {
+			uid = int(statT.Uid)
+			gid = int(statT.Gid)
+		}
+	}
+
+	if targetPath == "/etc/keychain-auth/config.json" {
+		mode = 0600
+	}
+
+	if err := os.Chmod(tmpPath, mode); err != nil {
+		return err
+	}
+	if uid != -1 || gid != -1 {
+		_ = os.Chown(tmpPath, uid, gid)
+	}
+	return nil
 }

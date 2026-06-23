@@ -3,10 +3,12 @@
 #
 # Binaries for programs and plugins
 *.exe
+!internal/keychain/keychain-helper.exe
 *.exe~
 *.dll
 *.so
 *.dylib
+
 
 # Test binary, built with `go test -c`
 *.test

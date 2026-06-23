@@ -13,7 +13,7 @@ func ensureDir(path string) error {
 	// If socket is in system directory, don't use 0700 if it already exists.
 	// The installer will set correct permissions for /run/keychain-auth.
 	if strings.Contains(path, "/run/keychain-auth") {
-		return os.MkdirAll(filepath.Dir(path), 0775)
+		return os.MkdirAll(filepath.Dir(path), 0755)
 	}
 	return os.MkdirAll(filepath.Dir(path), 0700)
 }
@@ -24,9 +24,9 @@ func listen(path string) (net.Listener, error) {
 
 func chmod(path string) error {
 	// If running under the dedicated system user (socket in /run/keychain-auth),
-	// use 0660 to allow the agentgroup to write to it.
+	// use 0666 to allow any client to connect (verified via peer credentials).
 	if strings.Contains(path, "/run/keychain-auth") {
-		return os.Chmod(path, 0660)
+		return os.Chmod(path, 0666)
 	}
 	return os.Chmod(path, 0600)
 }

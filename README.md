@@ -67,6 +67,69 @@ If an unregistered binary attempts to query the socket:
 
 ---
 
+## 🔌 JSON Wire Protocol Specification
+
+Applications communicate with the `keychain-auth` daemon by exchange of newline-delimited JSON messages over the local IPC channel.
+
+### IPC Transport Path
+* **Linux/macOS (Unix Domain Socket)**: `/run/keychain-auth/agent.sock` (falls back to `~/.config/keychain-auth/agent.sock` if run in user space).
+* **Windows (Named Pipe)**: `\\.\pipe\keychain-auth`.
+
+### Request Schema
+Requests are JSON objects containing the following fields:
+
+```json
+{
+  "type": "REQUEST",
+  "action": "read" | "write" | "delete" | "search" | "check",
+  "service": "ServiceNamespace",
+  "match": "exact" | "prefix",
+  "targets": ["key1", "key2"],
+  "values": ["value1", "value2"]
+}
+```
+
+* `type` (string, required): Must be `"REQUEST"`.
+* `action` (string, required): 
+  * `read`: Decrypts and retrieves the values for the specified `targets`.
+  * `write`: Encrypts and writes the corresponding `values` for the specified `targets`.
+  * `delete`: Removes the specified `targets` from the keychain.
+  * `search`: Lists all registered key names under the `service` namespace.
+  * `check`: Checks if the caller binary (or the binary passed as the target) is registered and authorized.
+* `service` (string, required): The service/app namespace isolating the secrets (e.g. `AgentSecrets`).
+* `match` (string, optional): `"exact"` (default) or `"prefix"`. If `"prefix"`, matches target keys starting with the specified string. (Not allowed for `write`).
+* `targets` (array of strings, optional): The key/account names being acted on. Required for `read`, `write`, `delete`, and `check`.
+* `values` (array of strings, optional): The plaintext values to store. Required and must align 1-to-1 in length with `targets` for `write`.
+
+### Response Schema
+Responses are JSON objects containing the following fields:
+
+```json
+{
+  "type": "RESPONSE",
+  "status": "success" | "denied" | "error",
+  "reason": "ReasonCode",
+  "results": [
+    {
+      "target": "key1",
+      "value": "plaintext_value"
+    }
+  ]
+}
+```
+
+* `type` (string): Always `"RESPONSE"`.
+* `status` (string): `"success"`, `"denied"`, or `"error"`.
+* `reason` (string, optional): Present if `status` is `"denied"` or `"error"`. Granular codes include:
+  * `unregistered_binary_pending_approval`: The calling binary is not registered.
+  * `service_not_allowed`: The binary does not have access permissions for the requested service.
+  * `action_not_in_policy`: The binary's policy denies the specific action (e.g. attempting to `write` when only `read` is authorized).
+  * `malformed_request`: Invalid JSON envelope, field mismatch, or illegal match type.
+  * `internal_error`: OS-level or hardware-level keychain operation failed.
+* `results` (array, optional): Present on successful `read` or `search` operations. For `search`, the `value` field is omitted to prevent leaking secrets.
+
+---
+
 ## 📋 Platform Support
 
 | Platform | IPC Transport | Process Verification | Entitlement Keychain Storage |

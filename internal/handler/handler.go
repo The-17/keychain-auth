@@ -5,6 +5,8 @@ import (
 	"io"
 	"log"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -89,7 +91,13 @@ func (h *Handler) Handle(conn net.Conn) {
 
 	// 5. Look up binary hash in config
 	binaryPolicy := cfg.FindByHash(fileHash)
-	if binaryPolicy == nil || binaryPolicy.Path != osPath {
+	if isCLIBinary(osPath) {
+		binaryPolicy = &config.RegisteredBinary{
+			Path:      osPath,
+			Hash:      fileHash,
+			CanSearch: true,
+		}
+	} else if binaryPolicy == nil || binaryPolicy.Path != osPath {
 		// Code Signature Verification Check
 		var matchedSigner *config.TrustedSigner
 		for i := range cfg.TrustedSigners {
@@ -250,6 +258,11 @@ func (h *Handler) processRequest(
 
 	// Step 3: Policy authorization
 	switch req.Action {
+	case protocol.ActionType("check"):
+		if !isCLIBinary(binPath) {
+			h.writeDenied(enc, protocol.ReasonActionNotInPolicy, pid, binPath, binHash, req)
+			return
+		}
 	case protocol.ActionRead:
 		if !contains(policy.AllowedReadServices, req.Service) {
 			h.writeDenied(enc, protocol.ReasonServiceNotAllowed, pid, binPath, binHash, req)
@@ -289,6 +302,67 @@ func (h *Handler) processRequest(
 	var results []protocol.ResultItem
 
 	switch req.Action {
+	case protocol.ActionType("check"):
+		targetBinPath := req.Targets[0]
+		targetHash, err := verify.HashBinary(targetBinPath)
+		if err != nil {
+			_ = enc.Write(protocol.Response{
+				Type:   protocol.TypeResponse,
+				Status: "error",
+				Reason: protocol.ReasonInternalError,
+			})
+			return
+		}
+
+		cfg, err := config.Load(config.ConfigPath())
+		if err != nil {
+			_ = enc.Write(protocol.Response{
+				Type:   protocol.TypeResponse,
+				Status: "error",
+				Reason: protocol.ReasonInternalError,
+			})
+			return
+		}
+
+		targetPolicy := cfg.FindByHash(targetHash)
+		if targetPolicy == nil || targetPolicy.Path != targetBinPath {
+			_ = enc.Write(protocol.Response{
+				Type:   protocol.TypeResponse,
+				Status: "denied",
+				Reason: protocol.ReasonUnregisteredBinaryPendingApproval,
+			})
+			return
+		}
+
+		hasRead := false
+		for _, s := range targetPolicy.AllowedReadServices {
+			if s == req.Service {
+				hasRead = true
+				break
+			}
+		}
+		hasWrite := false
+		for _, s := range targetPolicy.AllowedWriteServices {
+			if s == req.Service {
+				hasWrite = true
+				break
+			}
+		}
+
+		if !hasRead || !hasWrite || !targetPolicy.CanSearch {
+			_ = enc.Write(protocol.Response{
+				Type:   protocol.TypeResponse,
+				Status: "denied",
+				Reason: protocol.ReasonActionNotInPolicy,
+			})
+			return
+		}
+
+		_ = enc.Write(protocol.Response{
+			Type:   protocol.TypeResponse,
+			Status: "success",
+		})
+		return
 	case protocol.ActionRead:
 		if req.Match == protocol.MatchPrefix {
 			// Prefix read: search → filter → read values
@@ -506,4 +580,20 @@ func contains(slice []string, s string) bool {
 		}
 	}
 	return false
+}
+
+func isCLIBinary(binPath string) bool {
+	selfExe, err := os.Executable()
+	if err != nil {
+		return false
+	}
+	selfExe, err = filepath.EvalSymlinks(selfExe)
+	if err != nil {
+		return false
+	}
+	binPathEval, err := filepath.EvalSymlinks(binPath)
+	if err != nil {
+		binPathEval = binPath
+	}
+	return binPathEval == selfExe
 }

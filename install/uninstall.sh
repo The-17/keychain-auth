@@ -42,6 +42,6 @@ echo "  sudo rm -rf /etc/keychain-auth /var/lib/keychain-auth"
 # (We don't delete them automatically as they might own other resources, but we print a message).
 echo "To remove the system user and group, you can run:"
 echo "  sudo userdel keychain-auth"
-echo "  sudo groupdel agentgroup"
+echo "  sudo groupdel keychain-auth"
 
 echo "Uninstall complete!"

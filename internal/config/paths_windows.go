@@ -32,3 +32,7 @@ func AuditLogPath() string {
 func DefaultSocketPath() string {
 	return `\\.\pipe\keychain-auth`
 }
+
+func applyPermissions(tmpPath, targetPath string) error {
+	return nil
+}

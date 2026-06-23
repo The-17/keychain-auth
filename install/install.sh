@@ -16,33 +16,21 @@ fi
 
 echo "Setting up dedicated system user/group..."
 
-# 2. Create agentgroup if not exists
-if ! getent group agentgroup >/dev/null; then
-  groupadd -r agentgroup
-  echo "Created group 'agentgroup'."
-fi
-
-# Add real user to agentgroup
-if [ "$REAL_USER" != "root" ]; then
-  usermod -aG agentgroup "$REAL_USER"
-  echo "Added user '$REAL_USER' to group 'agentgroup'."
-fi
-
-# 3. Create keychain-auth system group and user if not exists
+# 2. Create keychain-auth system group and user if not exists
 if ! getent group keychain-auth >/dev/null; then
   groupadd -r keychain-auth
   echo "Created group 'keychain-auth'."
 fi
 
 if ! getent passwd keychain-auth >/dev/null; then
-  useradd -r -s /usr/sbin/nologin -d /var/lib/keychain-auth -g keychain-auth -G agentgroup keychain-auth
+  useradd -r -s /usr/sbin/nologin -d /var/lib/keychain-auth -g keychain-auth keychain-auth
   echo "Created system user 'keychain-auth'."
 else
-  # Ensure user is in agentgroup with correct primary group
-  usermod -g keychain-auth -aG agentgroup keychain-auth
+  # Ensure user has correct primary group
+  usermod -g keychain-auth keychain-auth
 fi
 
-# 4. Create directories with strict permissions
+# 3. Create directories with strict permissions
 echo "Creating system directories..."
 mkdir -p /etc/keychain-auth
 mkdir -p /var/lib/keychain-auth
@@ -50,18 +38,18 @@ mkdir -p /run/keychain-auth
 mkdir -p /var/log/keychain-auth
 
 # Set ownership
-chown -R keychain-auth:agentgroup /etc/keychain-auth
+chown -R keychain-auth:keychain-auth /etc/keychain-auth
 chown -R keychain-auth:keychain-auth /var/lib/keychain-auth
-chown -R keychain-auth:agentgroup /run/keychain-auth
-chown -R keychain-auth:agentgroup /var/log/keychain-auth
+chown -R keychain-auth:keychain-auth /run/keychain-auth
+chown -R keychain-auth:keychain-auth /var/log/keychain-auth
 
 # Set permissions
-chmod 750 /etc/keychain-auth
+chmod 700 /etc/keychain-auth
 chmod 700 /var/lib/keychain-auth
-chmod 770 /run/keychain-auth
-chmod 770 /var/log/keychain-auth
+chmod 755 /run/keychain-auth
+chmod 700 /var/log/keychain-auth
 
-# 5. Initialize config.json if not exists
+# 4. Initialize config.json if not exists
 CONFIG_FILE="/etc/keychain-auth/config.json"
 if [ ! -f "$CONFIG_FILE" ]; then
   echo "Initializing empty config.json..."
@@ -72,19 +60,20 @@ if [ ! -f "$CONFIG_FILE" ]; then
   "trusted_signers": []
 }
 EOF
-  chown keychain-auth:agentgroup "$CONFIG_FILE"
-  chmod 640 "$CONFIG_FILE"
+  chown keychain-auth:keychain-auth "$CONFIG_FILE"
+  chmod 600 "$CONFIG_FILE"
 fi
 
-# 6. Copy binary to /usr/local/bin
-if [ -f "./keychain-auth" ]; then
+# 5. Copy binary to /usr/local/bin
+if [ -f "./keychain-auth" ] && [ ! "./keychain-auth" -ef "/usr/local/bin/keychain-auth" ]; then
   echo "Installing binary to /usr/local/bin/keychain-auth..."
-  cp ./keychain-auth /usr/local/bin/keychain-auth
-  chown root:root /usr/local/bin/keychain-auth
-  chmod 755 /usr/local/bin/keychain-auth
+  install -m 755 ./keychain-auth /usr/local/bin/keychain-auth
+elif [ -f "./bin/keychain-auth" ] && [ ! "./bin/keychain-auth" -ef "/usr/local/bin/keychain-auth" ]; then
+  echo "Installing binary to /usr/local/bin/keychain-auth..."
+  install -m 755 ./bin/keychain-auth /usr/local/bin/keychain-auth
 fi
 
-# 7. Setup systemd service if systemd is available
+# 6. Setup systemd service if systemd is available
 if [ -d /etc/systemd/system ]; then
   echo "Installing systemd service..."
   cat <<EOF > /etc/systemd/system/keychain-auth.service
@@ -95,11 +84,13 @@ After=network.target
 [Service]
 Type=simple
 User=keychain-auth
-Group=agentgroup
+Group=keychain-auth
 ExecStart=/usr/local/bin/keychain-auth start
 Restart=always
 RuntimeDirectory=keychain-auth
-RuntimeDirectoryMode=0770
+RuntimeDirectoryMode=0755
+AmbientCapabilities=CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
+CapabilityBoundingSet=CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
 
 [Install]
 WantedBy=multi-user.target
@@ -110,4 +101,3 @@ EOF
 fi
 
 echo "Installation complete!"
-echo "Please note: You may need to log out and log back in for the group assignment ('agentgroup') to take effect."

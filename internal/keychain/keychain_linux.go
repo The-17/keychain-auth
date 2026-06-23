@@ -6,6 +6,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	_ "embed"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -225,7 +226,17 @@ func isWSL() bool {
 }
 
 func getWindowsUserProfile() string {
-	cmd := exec.Command("cmd.exe", "/c", "echo %USERPROFILE%")
+	cmdPath := "cmd.exe"
+	if _, err := exec.LookPath("cmd.exe"); err != nil {
+		for _, p := range []string{"/mnt/c/Windows/System32/cmd.exe", "/mnt/c/Windows/system32/cmd.exe"} {
+			if _, statErr := os.Stat(p); statErr == nil {
+				cmdPath = p
+				break
+			}
+		}
+	}
+
+	cmd := exec.Command(cmdPath, "/c", "echo %USERPROFILE%")
 	out, err := cmd.Output()
 	if err != nil {
 		return ""
@@ -243,7 +254,40 @@ func getWindowsUserProfile() string {
 	return strings.TrimSpace(string(wslPathBytes))
 }
 
+//go:embed keychain-helper.exe
+var helperBytes []byte
+
+func ensureHelperExists() error {
+	userProfile := getWindowsUserProfile()
+	if userProfile == "" {
+		return fmt.Errorf("cannot resolve Windows user profile")
+	}
+
+	targetDir := filepath.Join(userProfile, ".config", "keychain-auth")
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		return fmt.Errorf("failed to create config directory %s: %w", targetDir, err)
+	}
+
+	targetPath := filepath.Join(targetDir, "keychain-helper.exe")
+
+	// Check if already exists and matches the size
+	if info, err := os.Stat(targetPath); err == nil {
+		if info.Size() == int64(len(helperBytes)) {
+			return nil
+		}
+	}
+
+	// Write the embedded bytes
+	if err := os.WriteFile(targetPath, helperBytes, 0755); err != nil {
+		return fmt.Errorf("failed to write helper to %s: %w", targetPath, err)
+	}
+
+	return nil
+}
+
 func runKeychainHelper(args ...string) (string, error) {
+	_ = ensureHelperExists() // Try to ensure the helper is extracted to the user's config folder
+
 	paths := []string{"keychain-helper.exe"}
 	if userProfile := getWindowsUserProfile(); userProfile != "" {
 		paths = append(paths, filepath.Join(userProfile, ".config", "keychain-auth", "keychain-helper.exe"))

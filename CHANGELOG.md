@@ -4,6 +4,21 @@ All notable changes to the `keychain-auth` project will be documented in this fi
 
 ---
 
+## [3.1.0] - 2026-06-23
+
+This release introduces automated Windows helper binary embedding/extraction for zero-manual WSL setup, protocol support for unprivileged client-binary authorization status checks, and more robust IPC permissions.
+
+### Added
+*   **WSL Host Interop Auto-Extraction**: Automatically cross-compiles, embeds, and extracts the Windows `keychain-helper.exe` utility to the Windows host profile directory (`C:\Users\<user>\.config\keychain-auth\keychain-helper.exe`) on daemon demand, making WSL keychain integrations completely zero-setup.
+*   **IPC Check Action (`check`)**: Added support for an unprivileged `check` action in the JSON wire protocol to allow client CLIs to query connection and registration authorization status directly.
+*   **CLI Status Command (`keychain-auth status`)**: Implemented a daemon status query command returning JSON or plain text reporting running mode, socket path, mode, and sudo requirements.
+
+### Changed
+*   **Socket Directory & Socket Permissions**: Relaxed socket directory permissions to `0755` and socket file permissions to `0666` to facilitate seamless daemon access for standard WSL user processes.
+*   **Gitignore Tracking**: Updated `.gitignore` to track `internal/keychain/keychain-helper.exe` while preserving overall `.exe` exclusions.
+
+---
+
 ## [3.0.0] - 2026-06-21
 
 This major release transforms the `keychain-auth` daemon into a hardened, zero-trust **Process Anti-Impersonation Boundary** with developer code signature verification, hardware-sealed fallbacks, and Go-native sandboxed installation.

@@ -14,8 +14,13 @@ var rootCmd = &cobra.Command{
 It enforces identity verification and namespace isolation on every request.`,
 }
 
+// daemonVersion holds the build version, captured in Execute so subcommands
+// (e.g. `status --json`) can report the running binary's version to integrators.
+var daemonVersion = "dev"
+
 // Execute adds all child commands to the root command and sets flags appropriately.
 func Execute(version string) {
+	daemonVersion = version
 	rootCmd.Version = version
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)

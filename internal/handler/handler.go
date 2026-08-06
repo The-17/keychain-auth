@@ -408,11 +408,32 @@ func (h *Handler) processRequest(
 		}
 
 	case protocol.ActionWrite:
-		for i, target := range req.Targets {
-			val := req.Values[i]
-			if err := h.keychain.Write(req.Service, target, val); err != nil {
-				h.logAndWriteError(enc, req, pid, binPath, binHash, err)
+		// Parallelize writes when multiple targets are batched
+		if len(req.Targets) > 1 {
+			errCh := make(chan error, len(req.Targets))
+			for i, target := range req.Targets {
+				go func(tgt, val string) {
+					errCh <- h.keychain.Write(req.Service, tgt, val)
+				}(target, req.Values[i])
+			}
+			// Collect all results before returning
+			var firstErr error
+			for range req.Targets {
+				if err := <-errCh; err != nil && firstErr == nil {
+					firstErr = err
+				}
+			}
+			if firstErr != nil {
+				h.logAndWriteError(enc, req, pid, binPath, binHash, firstErr)
 				return
+			}
+		} else {
+			for i, target := range req.Targets {
+				val := req.Values[i]
+				if err := h.keychain.Write(req.Service, target, val); err != nil {
+					h.logAndWriteError(enc, req, pid, binPath, binHash, err)
+					return
+				}
 			}
 		}
 

@@ -28,6 +28,13 @@ type LinuxKeychain struct {
 	keyPath        string // path to encryption key file
 	mu             sync.Mutex
 	cache          map[string]string // in-memory cache of file store for fast reads
+
+	// keyMu guards cachedKey. The AES key is stable for the daemon's lifetime,
+	// so we fetch it once and reuse it. This matters on WSL, where each fetch
+	// spawns Windows processes (cmd.exe + wslpath + helper.exe) costing seconds;
+	// without caching, a batch write re-derived the key per operation.
+	keyMu     sync.Mutex
+	cachedKey []byte
 }
 
 func New() *LinuxKeychain {
@@ -371,53 +378,64 @@ func tpm2Unseal(pubPath, privPath string) ([]byte, error) {
 }
 
 // getOrCreateKey loads the AES-256 key, using WSL host interop, TPM2, or local file fallback.
+// The key is cached in memory after the first fetch so repeated operations (e.g. a batch
+// write with 14 targets) don't re-derive it, which matters on WSL where each fetch spawns
+// Windows processes (cmd.exe + wslpath + helper.exe) costing seconds.
 func (lk *LinuxKeychain) getOrCreateKey() ([]byte, error) {
+	lk.keyMu.Lock()
+	defer lk.keyMu.Unlock()
+
+	// Return cached key if we've already fetched it this session
+	if lk.cachedKey != nil {
+		return lk.cachedKey, nil
+	}
+
+	var key []byte
+
 	if isWSL() {
 		base64Key, err := runKeychainHelper("get")
 		if err != nil {
 			return nil, fmt.Errorf("WSL key interop: %w", err)
 		}
-		key, err := base64.StdEncoding.DecodeString(base64Key)
+		key, err = base64.StdEncoding.DecodeString(base64Key)
 		if err != nil || len(key) != 32 {
 			return nil, fmt.Errorf("invalid key returned from Windows host helper: %w", err)
 		}
-		return key, nil
-	}
-
-	if hasTPM2() {
+	} else if hasTPM2() {
 		pubPath := lk.keyPath + ".pub"
 		privPath := lk.keyPath + ".priv"
 		if _, err := os.Stat(pubPath); err == nil {
-			key, err := tpm2Unseal(pubPath, privPath)
-			if err == nil && len(key) == 32 {
-				return key, nil
+			unsealedKey, err := tpm2Unseal(pubPath, privPath)
+			if err == nil && len(unsealedKey) == 32 {
+				key = unsealedKey
 			}
 		}
 
-		key := make([]byte, 32)
-		if _, err := io.ReadFull(rand.Reader, key); err != nil {
-			return nil, fmt.Errorf("generate random key: %w", err)
+		if key == nil {
+			key = make([]byte, 32)
+			if _, err := io.ReadFull(rand.Reader, key); err != nil {
+				return nil, fmt.Errorf("generate random key: %w", err)
+			}
+			if err := tpm2Seal(key, pubPath, privPath); err != nil {
+				return nil, fmt.Errorf("seal key to TPM2: %w", err)
+			}
 		}
-		if err := tpm2Seal(key, pubPath, privPath); err != nil {
-			return nil, fmt.Errorf("seal key to TPM2: %w", err)
+	} else {
+		data, err := os.ReadFile(lk.keyPath)
+		if err == nil && len(data) == 32 {
+			key = data
+		} else {
+			key = make([]byte, 32)
+			if _, err := io.ReadFull(rand.Reader, key); err != nil {
+				return nil, fmt.Errorf("generate encryption key: %w", err)
+			}
+			if err := os.WriteFile(lk.keyPath, key, 0600); err != nil {
+				return nil, fmt.Errorf("write encryption key: %w", err)
+			}
 		}
-		return key, nil
 	}
 
-	data, err := os.ReadFile(lk.keyPath)
-	if err == nil && len(data) == 32 {
-		return data, nil
-	}
-
-	// Generate a new 256-bit key
-	key := make([]byte, 32)
-	if _, err := io.ReadFull(rand.Reader, key); err != nil {
-		return nil, fmt.Errorf("generate encryption key: %w", err)
-	}
-
-	if err := os.WriteFile(lk.keyPath, key, 0600); err != nil {
-		return nil, fmt.Errorf("write encryption key: %w", err)
-	}
+	lk.cachedKey = key
 	return key, nil
 }
 

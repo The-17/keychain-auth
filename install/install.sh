@@ -44,7 +44,7 @@ chown -R keychain-auth:keychain-auth /run/keychain-auth
 chown -R keychain-auth:keychain-auth /var/log/keychain-auth
 
 # Set permissions
-chmod 700 /etc/keychain-auth
+chmod 755 /etc/keychain-auth
 chmod 700 /var/lib/keychain-auth
 chmod 755 /run/keychain-auth
 chmod 700 /var/log/keychain-auth
@@ -61,7 +61,7 @@ if [ ! -f "$CONFIG_FILE" ]; then
 }
 EOF
   chown keychain-auth:keychain-auth "$CONFIG_FILE"
-  chmod 600 "$CONFIG_FILE"
+  chmod 644 "$CONFIG_FILE"
 fi
 
 # 5. Copy binary to /usr/local/bin

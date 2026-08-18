@@ -12,15 +12,22 @@ func ConfigPath() string {
 	if ConfigPathOverride != "" {
 		return ConfigPathOverride
 	}
-	// Check if the system-wide config directory exists (dedicated user mode)
-	sysDir := "/etc/keychain-auth"
-	if _, err := os.Stat(sysDir); err == nil {
-		return filepath.Join(sysDir, "config.json")
+	// Prefer system config if it exists and is readable by the current process
+	sysFile := "/etc/keychain-auth/config.json"
+	if f, err := os.Open(sysFile); err == nil {
+		f.Close()
+		return sysFile
+	}
+	if os.Getuid() == 0 {
+		if _, err := os.Stat("/etc/keychain-auth"); err == nil {
+			return sysFile
+		}
 	}
 
 	dir := os.Getenv("XDG_CONFIG_HOME")
 	if dir == "" {
-		dir = filepath.Join(os.Getenv("HOME"), ".config")
+		home, _ := os.UserHomeDir()
+		dir = filepath.Join(home, ".config")
 	}
 	return filepath.Join(dir, "keychain-auth", "config.json")
 }
@@ -33,7 +40,8 @@ func AuditLogPath() string {
 
 	dir := os.Getenv("XDG_DATA_HOME")
 	if dir == "" {
-		dir = filepath.Join(os.Getenv("HOME"), ".local", "share")
+		home, _ := os.UserHomeDir()
+		dir = filepath.Join(home, ".local", "share")
 	}
 	return filepath.Join(dir, "keychain-auth", "audit.log")
 }
@@ -49,14 +57,15 @@ func DefaultSocketPath() string {
 
 	runtimeDir := os.Getenv("XDG_RUNTIME_DIR")
 	if runtimeDir == "" {
-		runtimeDir = filepath.Join(os.Getenv("HOME"), ".cache")
+		home, _ := os.UserHomeDir()
+		runtimeDir = filepath.Join(home, ".cache")
 	}
 	return filepath.Join(runtimeDir, "keychain-auth", "agent.sock")
 }
 
 func applyPermissions(tmpPath, targetPath string) error {
 	var uid, gid int = -1, -1
-	var mode os.FileMode = 0600
+	var mode os.FileMode = 0644
 	if info, err := os.Stat(targetPath); err == nil {
 		mode = info.Mode().Perm()
 		if statT, ok := info.Sys().(*syscall.Stat_t); ok {
@@ -66,7 +75,7 @@ func applyPermissions(tmpPath, targetPath string) error {
 	}
 
 	if targetPath == "/etc/keychain-auth/config.json" {
-		mode = 0600
+		mode = 0644
 	}
 
 	if err := os.Chmod(tmpPath, mode); err != nil {

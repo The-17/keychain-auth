@@ -2,6 +2,7 @@
 
 # Variables
 BINARY_NAME=keychain-auth
+VERSION?=3.2.2
 BUILD_DIR=bin
 GO=go
 GOFMT=gofmt
@@ -21,7 +22,7 @@ help:
 build:
 	@echo "Building $(BINARY_NAME)..."
 	@mkdir -p $(BUILD_DIR)
-	$(GO) build -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/keychain-auth/
+	$(GO) build -trimpath -ldflags "-s -w -X main.version=$(VERSION)" -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/keychain-auth/
 	@echo "✓ Built $(BUILD_DIR)/$(BINARY_NAME)"
 
 test:

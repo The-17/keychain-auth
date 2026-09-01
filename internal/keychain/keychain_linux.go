@@ -232,6 +232,16 @@ func isWSL() bool {
 	return false
 }
 
+func hasWSLInterop() bool {
+	if !isWSL() {
+		return false
+	}
+	if _, err := os.Stat("/proc/sys/fs/binfmt_misc/WSLInterop"); err == nil {
+		return true
+	}
+	return false
+}
+
 func getWindowsUserProfile() string {
 	cmdPath := "cmd.exe"
 	if _, err := exec.LookPath("cmd.exe"); err != nil {
@@ -392,16 +402,17 @@ func (lk *LinuxKeychain) getOrCreateKey() ([]byte, error) {
 
 	var key []byte
 
-	if isWSL() {
+	if hasWSLInterop() {
 		base64Key, err := runKeychainHelper("get")
-		if err != nil {
-			return nil, fmt.Errorf("WSL key interop: %w", err)
+		if err == nil {
+			k, decErr := base64.StdEncoding.DecodeString(base64Key)
+			if decErr == nil && len(k) == 32 {
+				key = k
+			}
 		}
-		key, err = base64.StdEncoding.DecodeString(base64Key)
-		if err != nil || len(key) != 32 {
-			return nil, fmt.Errorf("invalid key returned from Windows host helper: %w", err)
-		}
-	} else if hasTPM2() {
+	}
+
+	if key == nil && hasTPM2() {
 		pubPath := lk.keyPath + ".pub"
 		privPath := lk.keyPath + ".priv"
 		if _, err := os.Stat(pubPath); err == nil {

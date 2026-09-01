@@ -36,6 +36,19 @@ builds:
     ldflags:
       - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
 
+  - id: windows
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    main: ./cmd/keychain-auth
+    binary: keychain-auth
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
+
 archives:
   - format: tar.gz
     # Standard GoReleaser v2 naming template
@@ -58,7 +71,7 @@ brews:
       name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
     directory: Formula
-    homepage: "https://agentsecrets.theseventeen.co"
+    homepage: "https://agentsecrets.tech"
     description: "Security policy daemon for AgentSecrets"
     license: "MIT"
     test: |

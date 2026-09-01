@@ -71,6 +71,10 @@ func New() *LinuxKeychain {
 // fileStoreDir returns the directory for the encrypted file store.
 // Uses XDG_DATA_HOME if set, otherwise ~/.local/share/keychain-auth.
 func fileStoreDir() string {
+	sysDir := "/var/lib/keychain-auth"
+	if _, err := os.Stat(sysDir); err == nil {
+		return sysDir
+	}
 	if xdg := os.Getenv("XDG_DATA_HOME"); xdg != "" {
 		return filepath.Join(xdg, "keychain-auth")
 	}
@@ -182,14 +186,14 @@ func (lk *LinuxKeychain) encrypt(plaintext string) (string, error) {
 }
 
 func (lk *LinuxKeychain) decrypt(encodedCiphertext string) (string, error) {
-	ciphertext, err := base64.StdEncoding.DecodeString(encodedCiphertext)
-	if err != nil {
-		return "", fmt.Errorf("decode base64 ciphertext: %w", err)
-	}
-
 	key, err := lk.getOrCreateKey()
 	if err != nil {
 		return "", err
+	}
+
+	ciphertext, err := base64.StdEncoding.DecodeString(encodedCiphertext)
+	if err != nil {
+		return "", fmt.Errorf("decode base64 ciphertext: %w", err)
 	}
 
 	block, err := aes.NewCipher(key)
@@ -259,16 +263,33 @@ func getWindowsUserProfile() string {
 		return ""
 	}
 	winPath := strings.TrimSpace(string(out))
-	if winPath == "" {
+	if winPath == "" || strings.Contains(winPath, "%USERPROFILE%") {
 		return ""
 	}
 
-	wslpathCmd := exec.Command("wslpath", "-u", winPath)
-	wslPathBytes, err := wslpathCmd.Output()
-	if err != nil {
-		return ""
+	wslpathBin := "wslpath"
+	if _, err := exec.LookPath("wslpath"); err != nil {
+		for _, p := range []string{"/usr/bin/wslpath", "/bin/wslpath"} {
+			if _, statErr := os.Stat(p); statErr == nil {
+				wslpathBin = p
+				break
+			}
+		}
 	}
-	return strings.TrimSpace(string(wslPathBytes))
+
+	wslpathCmd := exec.Command(wslpathBin, "-u", winPath)
+	wslPathBytes, err := wslpathCmd.Output()
+	if err == nil {
+		return strings.TrimSpace(string(wslPathBytes))
+	}
+
+	if len(winPath) >= 2 && winPath[1] == ':' {
+		drive := strings.ToLower(string(winPath[0]))
+		rest := filepath.ToSlash(winPath[2:])
+		return "/mnt/" + drive + rest
+	}
+
+	return ""
 }
 
 //go:embed keychain-helper.exe
@@ -431,7 +452,8 @@ func (lk *LinuxKeychain) getOrCreateKey() ([]byte, error) {
 				return nil, fmt.Errorf("seal key to TPM2: %w", err)
 			}
 		}
-	} else {
+	} else if key == nil {
+		_ = os.MkdirAll(filepath.Dir(lk.keyPath), 0700)
 		data, err := os.ReadFile(lk.keyPath)
 		if err == nil && len(data) == 32 {
 			key = data
@@ -479,6 +501,8 @@ func (lk *LinuxKeychain) persistToDisk() error {
 	}
 
 	ciphertext := gcm.Seal(nonce, nonce, plaintext, nil)
+
+	_ = os.MkdirAll(filepath.Dir(lk.storePath), 0700)
 
 	// Atomic write: write to temp file, then rename
 	tmpPath := lk.storePath + ".tmp"

@@ -2,7 +2,7 @@
 
 # Variables
 BINARY_NAME=keychain-auth
-VERSION?=3.2.5
+VERSION?=3.3.0
 BUILD_DIR=bin
 GO=go
 GOFMT=gofmt

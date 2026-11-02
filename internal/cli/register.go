@@ -37,6 +37,9 @@ var registerCmd = &cobra.Command{
         if err := cfg.Save(cfgPath); err != nil {
             return err
         }
+        // Keep the store owned by the daemon and non-world-readable even when this
+        // direct write ran as root, so the daemon retains write access.
+        ensureStoreDaemonOwned(cfgPath)
 
         fmt.Printf("Registered %s with hash %s\n", path, hash)
         return nil

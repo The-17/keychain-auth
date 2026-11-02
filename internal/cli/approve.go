@@ -77,6 +77,9 @@ var approveCmd = &cobra.Command{
 		if err := cfg.Save(cfgPath); err != nil {
 			return err
 		}
+		// Keep the store owned by the daemon and non-world-readable even when this
+		// direct write ran as root, so the daemon retains write access.
+		ensureStoreDaemonOwned(cfgPath)
 
 		// Remove from pending store
 		if err := pendingStore.Remove(hash); err != nil {

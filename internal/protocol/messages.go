@@ -44,6 +44,12 @@ const (
 	ReasonMalformedRequest                  ReasonCode = "malformed_request"
 	ReasonHashMismatchDuringFork            ReasonCode = "hash_mismatch_during_fork"
 	ReasonInternalError                     ReasonCode = "internal_error"
+	// ReasonAdminRequired is returned when an administrative action (authorize)
+	// was requested by a peer that does not hold administrator rights. On a
+	// system install that means the request did not come from root; an
+	// unprivileged process (including an adversarial agent running as the user)
+	// must not be able to authorize binaries.
+	ReasonAdminRequired ReasonCode = "admin_required"
 )
 
 // Envelope is used for initial JSON unmarshalling to determine message type.

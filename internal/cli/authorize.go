@@ -2,19 +2,26 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"time"
-	"os/user"
 
 	"github.com/The-17/keychain-auth/internal/config"
 	"github.com/The-17/keychain-auth/internal/protocol"
 	"github.com/The-17/keychain-auth/internal/verify"
 	"github.com/spf13/cobra"
 )
+
+// errAdminRequired signals that the daemon refused an administrative action
+// because the caller does not hold administrator rights. The command turns this
+// into a clear "run with sudo" message instead of falling back to a direct
+// write that would also fail.
+var errAdminRequired = errors.New("authorization requires administrator privileges")
 
 var authorizeCmd = &cobra.Command{
 	Use:   "authorize [path/to/binary] [service-name]",
@@ -32,15 +39,21 @@ var authorizeCmd = &cobra.Command{
 		// from the caller. This is the normal path for re-authorizing a binary
 		// after an upgrade (the hash changed), and it is what makes registration
 		// passwordless.
-		if err := queryDaemonToAuthorize(path, service); err == nil {
+		err = queryDaemonToAuthorize(path, service)
+		if err == nil {
 			fmt.Printf("Authorized %s for service %s\n", path, service)
 			return nil
+		}
+		if errors.Is(err, errAdminRequired) {
+			// The daemon is reachable but this caller is not privileged. On a
+			// system store only root may authorize; do not fall through to a
+			// direct write that would fail with a less actionable error.
+			return fmt.Errorf("authorization requires administrator privileges; run `sudo keychain-auth authorize %s %s`", path, service)
 		}
 
 		// Fallback: direct write, used only when the daemon is not reachable (for
 		// example the very first install, which runs elevated). Writing the system
-		// store this way requires root; the daemon path above is the passwordless
-		// one and is preferred whenever the daemon is up.
+		// store this way requires root.
 		hash, err := verify.HashBinary(path)
 		if err != nil {
 			return fmt.Errorf("failed to hash binary: %w", err)
@@ -147,6 +160,9 @@ func queryDaemonToAuthorize(path, service string) error {
 		return err
 	}
 	if resp.Status != "success" {
+		if resp.Reason == protocol.ReasonAdminRequired {
+			return errAdminRequired
+		}
 		return fmt.Errorf("daemon authorize failed: status=%s reason=%s", resp.Status, resp.Reason)
 	}
 	return nil

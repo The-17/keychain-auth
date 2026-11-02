@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -51,11 +52,14 @@ func (m *mockVerifier) ResolveCommandLine(pid int) ([]string, error) {
 // --- Mock Keychain ---
 
 type mockKeychain struct {
+	mu      sync.Mutex          // guards secrets/search; batch ops run concurrently
 	secrets map[string]string   // service:target -> value
 	search  map[string][]string // service -> targets
 }
 
 func (m *mockKeychain) Read(service, target string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	val, ok := m.secrets[service+":"+target]
 	if !ok {
 		return "", fmt.Errorf("secret not found")
@@ -64,11 +68,15 @@ func (m *mockKeychain) Read(service, target string) (string, error) {
 }
 
 func (m *mockKeychain) Write(service, target, value string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.secrets[service+":"+target] = value
 	return nil
 }
 
 func (m *mockKeychain) Delete(service, target string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	key := service + ":" + target
 	if _, ok := m.secrets[key]; !ok {
 		return fmt.Errorf("secret not found")
@@ -78,6 +86,8 @@ func (m *mockKeychain) Delete(service, target string) error {
 }
 
 func (m *mockKeychain) Search(service string) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return m.search[service], nil
 }
 

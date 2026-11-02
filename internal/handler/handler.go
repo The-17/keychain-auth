@@ -55,6 +55,11 @@ func (h *Handler) Handle(conn net.Conn) {
 		return
 	}
 
+	// 1b. Retrieve the caller's OS identity. This is the trust boundary for
+	// administrative actions: the kernel records it at connect() time and it
+	// cannot be forged by an unprivileged process.
+	peerUID, peerUIDOK := verify.PeerUID(conn)
+
 	// 2. Resolve caller binary path
 	osPath, err := h.verifier.ResolveBinaryPath(pid)
 	if err != nil {
@@ -205,7 +210,7 @@ func (h *Handler) Handle(conn net.Conn) {
 			return
 		}
 
-		h.processRequest(enc, &req, pid, osPath, fileHash, binaryPolicy)
+		h.processRequest(enc, &req, pid, peerUID, peerUIDOK, osPath, fileHash, binaryPolicy)
 	}
 }
 
@@ -213,6 +218,8 @@ func (h *Handler) processRequest(
 	enc *protocol.Encoder,
 	req *protocol.Request,
 	pid int,
+	peerUID uint32,
+	peerUIDOK bool,
 	binPath, binHash string,
 	policy *config.RegisteredBinary,
 ) {
@@ -264,12 +271,19 @@ func (h *Handler) processRequest(
 			return
 		}
 	case protocol.ActionAuthorize:
-		// Only the keychain-auth CLI may write the trust store. A random
-		// registered binary must not be able to authorize other binaries, so
-		// this is gated on the caller being the CLI itself. The daemon owns the
-		// store, so the write happens as its own user with no elevation.
+		// Authorizing a binary grants it a service namespace, so it is an
+		// administrative action. Being the keychain-auth binary is NOT enough:
+		// any process can execute that binary, so the real gate is the caller's
+		// OS identity. On a system store the operator must escalate to root
+		// (sudo keychain-auth authorize); an unprivileged process, including an
+		// adversarial agent running as the user, is denied. The daemon still
+		// owns and writes the store, so the store stays daemon-owned.
 		if !isCLIBinary(binPath) {
 			h.writeDenied(enc, protocol.ReasonActionNotInPolicy, pid, binPath, binHash, req)
+			return
+		}
+		if !authorizePrivileged(peerUID, peerUIDOK, config.IsSystemStore(), os.Geteuid()) {
+			h.writeDenied(enc, protocol.ReasonAdminRequired, pid, binPath, binHash, req)
 			return
 		}
 	case protocol.ActionRead:
@@ -682,6 +696,23 @@ func contains(slice []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// authorizePrivileged decides whether a peer may perform the administrative
+// authorize action.
+//
+// On a system store the daemon runs as its own unprivileged user, so the
+// operator must escalate to root: a non-root peer is denied. On a user-mode
+// store the daemon runs as the user who owns it, and that same user is the trust
+// root. Unknown peer credentials always fail closed.
+func authorizePrivileged(peerUID uint32, peerUIDOK, systemStore bool, daemonUID int) bool {
+	if !peerUIDOK {
+		return false
+	}
+	if systemStore {
+		return peerUID == 0
+	}
+	return int(peerUID) == daemonUID
 }
 
 func isCLIBinary(binPath string) bool {

@@ -77,8 +77,18 @@ func (c *Config) Save(path string) error {
 func (c *Config) Register(path, hash string) error {
 	for i, rb := range c.RegisteredBinaries {
 		if rb.Path == path {
-			c.RegisteredBinaries[i].Hash = hash
-			c.RegisteredBinaries[i].RegisteredAt = time.Now().UTC().Format(time.RFC3339)
+			// A changed hash is a different binary. Never silently carry the old
+			// binary's service grants over to a new hash: otherwise a process
+			// could overwrite a trusted binary, re-register it, and inherit its
+			// access. Reset to Zero Trust; the operator must re-authorize the new
+			// binary explicitly. An unchanged hash is an idempotent no-op.
+			if rb.Hash != hash {
+				c.RegisteredBinaries[i].Hash = hash
+				c.RegisteredBinaries[i].RegisteredAt = time.Now().UTC().Format(time.RFC3339)
+				c.RegisteredBinaries[i].AllowedReadServices = []string{}
+				c.RegisteredBinaries[i].AllowedWriteServices = []string{}
+				c.RegisteredBinaries[i].CanSearch = false
+			}
 			return nil
 		}
 	}
@@ -108,4 +118,12 @@ func (c *Config) FindByHash(hash string) *RegisteredBinary {
 
 func PendingPath() string {
 	return filepath.Join(filepath.Dir(ConfigPath()), "pending.json")
+}
+
+// IsSystemStore reports whether the active trust store is the system-wide one
+// under /etc. On a system store the daemon runs as its own unprivileged user, so
+// administrative actions (authorize) must come from root. On a user-mode store
+// the daemon runs as the user who owns it, and that user is the trust root.
+func IsSystemStore() bool {
+	return ConfigPath() == "/etc/keychain-auth/config.json"
 }

@@ -258,7 +258,16 @@ func (h *Handler) processRequest(
 
 	// Step 3: Policy authorization
 	switch req.Action {
-	case protocol.ActionType("check"):
+	case protocol.ActionCheck:
+		if !isCLIBinary(binPath) {
+			h.writeDenied(enc, protocol.ReasonActionNotInPolicy, pid, binPath, binHash, req)
+			return
+		}
+	case protocol.ActionAuthorize:
+		// Only the keychain-auth CLI may write the trust store. A random
+		// registered binary must not be able to authorize other binaries, so
+		// this is gated on the caller being the CLI itself. The daemon owns the
+		// store, so the write happens as its own user with no elevation.
 		if !isCLIBinary(binPath) {
 			h.writeDenied(enc, protocol.ReasonActionNotInPolicy, pid, binPath, binHash, req)
 			return
@@ -302,7 +311,10 @@ func (h *Handler) processRequest(
 	var results []protocol.ResultItem
 
 	switch req.Action {
-	case protocol.ActionType("check"):
+	case protocol.ActionAuthorize:
+		h.handleAuthorize(enc, req, pid, binPath, binHash)
+		return
+	case protocol.ActionCheck:
 		targetBinPath := req.Targets[0]
 		targetHash, err := verify.HashBinary(targetBinPath)
 		if err != nil {
@@ -494,6 +506,75 @@ func (h *Handler) processRequest(
 		Status:  "success",
 		Results: results,
 	})
+}
+
+// handleAuthorize writes (or updates) a trust-store entry for the binary named
+// in req.Targets[0] for req.Service. It runs only for the keychain-auth CLI
+// caller (enforced in processRequest), which a human runs to approve a binary.
+// Because the daemon owns the trust store and runs as its own unprivileged user,
+// this write needs no elevation from the caller: authorization is daemon-mediated.
+func (h *Handler) handleAuthorize(
+	enc *protocol.Encoder,
+	req *protocol.Request,
+	pid int,
+	binPath, binHash string,
+) {
+	targetPath := req.Targets[0]
+	if abs, err := filepath.Abs(targetPath); err == nil {
+		targetPath = abs
+	}
+	targetHash, err := verify.HashBinary(targetPath)
+	if err != nil {
+		h.logAndWriteError(enc, req, pid, binPath, binHash, err)
+		return
+	}
+
+	cfg, err := config.Load(config.ConfigPath())
+	if err != nil {
+		h.logAndWriteError(enc, req, pid, binPath, binHash, err)
+		return
+	}
+
+	var policy *config.RegisteredBinary
+	for i := range cfg.RegisteredBinaries {
+		if cfg.RegisteredBinaries[i].Path == targetPath {
+			policy = &cfg.RegisteredBinaries[i]
+			break
+		}
+	}
+	if policy == nil {
+		cfg.RegisteredBinaries = append(cfg.RegisteredBinaries, config.RegisteredBinary{
+			Path:         targetPath,
+			Hash:         targetHash,
+			RegisteredAt: time.Now().UTC().Format(time.RFC3339),
+		})
+		policy = &cfg.RegisteredBinaries[len(cfg.RegisteredBinaries)-1]
+	} else {
+		policy.Hash = targetHash
+		policy.RegisteredAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	if !contains(policy.AllowedReadServices, req.Service) {
+		policy.AllowedReadServices = append(policy.AllowedReadServices, req.Service)
+	}
+	if !contains(policy.AllowedWriteServices, req.Service) {
+		policy.AllowedWriteServices = append(policy.AllowedWriteServices, req.Service)
+	}
+	policy.CanSearch = true
+
+	if err := cfg.Save(config.ConfigPath()); err != nil {
+		h.logAndWriteError(enc, req, pid, binPath, binHash, err)
+		return
+	}
+
+	_ = h.audit.Log(audit.Event{
+		Action:     "authorize",
+		PID:        pid,
+		BinaryPath: targetPath,
+		BinaryHash: targetHash,
+		Service:    req.Service,
+		Result:     "GRANTED",
+	})
+	_ = enc.Write(protocol.Response{Type: protocol.TypeResponse, Status: "success"})
 }
 
 // resolveByPrefix performs a search on the service namespace and returns only

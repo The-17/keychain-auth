@@ -1,11 +1,14 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
+	"net"
 	"path/filepath"
 	"time"
 
 	"github.com/The-17/keychain-auth/internal/config"
+	"github.com/The-17/keychain-auth/internal/protocol"
 	"github.com/The-17/keychain-auth/internal/verify"
 	"github.com/spf13/cobra"
 )
@@ -21,6 +24,20 @@ var authorizeCmd = &cobra.Command{
 		}
 		service := args[1]
 
+		// Preferred: ask the daemon to write the trust store. The daemon owns the
+		// store and runs as its own unprivileged user, so this needs no elevation
+		// from the caller. This is the normal path for re-authorizing a binary
+		// after an upgrade (the hash changed), and it is what makes registration
+		// passwordless.
+		if err := queryDaemonToAuthorize(path, service); err == nil {
+			fmt.Printf("Authorized %s for service %s\n", path, service)
+			return nil
+		}
+
+		// Fallback: direct write, used only when the daemon is not reachable (for
+		// example the very first install, which runs elevated). Writing the system
+		// store this way requires root; the daemon path above is the passwordless
+		// one and is preferred whenever the daemon is up.
 		hash, err := verify.HashBinary(path)
 		if err != nil {
 			return fmt.Errorf("failed to hash binary: %w", err)
@@ -32,7 +49,6 @@ var authorizeCmd = &cobra.Command{
 			return err
 		}
 
-		// Look for existing policy entry
 		var policy *config.RegisteredBinary
 		for i := range cfg.RegisteredBinaries {
 			if cfg.RegisteredBinaries[i].Path == path {
@@ -45,38 +61,20 @@ var authorizeCmd = &cobra.Command{
 			policy.Hash = hash
 			policy.RegisteredAt = time.Now().UTC().Format(time.RFC3339)
 		} else {
-			newBinary := config.RegisteredBinary{
+			cfg.RegisteredBinaries = append(cfg.RegisteredBinaries, config.RegisteredBinary{
 				Path:         path,
 				Hash:         hash,
 				RegisteredAt: time.Now().UTC().Format(time.RFC3339),
-			}
-			cfg.RegisteredBinaries = append(cfg.RegisteredBinaries, newBinary)
+			})
 			policy = &cfg.RegisteredBinaries[len(cfg.RegisteredBinaries)-1]
 		}
 
-		// Ensure the service is in AllowedReadServices and AllowedWriteServices
-		hasRead := false
-		for _, s := range policy.AllowedReadServices {
-			if s == service {
-				hasRead = true
-				break
-			}
-		}
-		if !hasRead {
+		if !containsService(policy.AllowedReadServices, service) {
 			policy.AllowedReadServices = append(policy.AllowedReadServices, service)
 		}
-
-		hasWrite := false
-		for _, s := range policy.AllowedWriteServices {
-			if s == service {
-				hasWrite = true
-				break
-			}
-		}
-		if !hasWrite {
+		if !containsService(policy.AllowedWriteServices, service) {
 			policy.AllowedWriteServices = append(policy.AllowedWriteServices, service)
 		}
-
 		policy.CanSearch = true
 
 		if err := cfg.Save(cfgPath); err != nil {
@@ -86,6 +84,54 @@ var authorizeCmd = &cobra.Command{
 		fmt.Printf("Authorized %s for service %s\n", path, service)
 		return nil
 	},
+}
+
+// queryDaemonToAuthorize asks the running daemon to write the trust-store entry.
+// The daemon only honors this from the keychain-auth CLI binary, and it writes
+// the store as its own user, so the caller never needs elevation.
+func queryDaemonToAuthorize(path, service string) error {
+	sockPath := config.DefaultSocketPath()
+	conn, err := net.Dial("unix", sockPath)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	dec := protocol.NewDecoder(conn)
+	enc := protocol.NewEncoder(conn)
+
+	req := protocol.Request{
+		Type:    protocol.TypeRequest,
+		Action:  protocol.ActionAuthorize,
+		Service: service,
+		Targets: []string{path},
+	}
+	if err := enc.Write(req); err != nil {
+		return err
+	}
+
+	raw, err := dec.ReadRaw()
+	if err != nil {
+		return err
+	}
+
+	var resp protocol.Response
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return err
+	}
+	if resp.Status != "success" {
+		return fmt.Errorf("daemon authorize failed: status=%s reason=%s", resp.Status, resp.Reason)
+	}
+	return nil
+}
+
+func containsService(slice []string, s string) bool {
+	for _, item := range slice {
+		if item == s {
+			return true
+		}
+	}
+	return false
 }
 
 func init() {

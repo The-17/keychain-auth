@@ -75,7 +75,11 @@ func applyPermissions(tmpPath, targetPath string) error {
 	}
 
 	if targetPath == "/etc/keychain-auth/config.json" {
-		mode = 0644
+		// The daemon owns its trust store and must be able to read AND write it
+		// as its own user (the installer chowns it keychain-auth:keychain-auth).
+		// It must not be world-readable. 0600 gives the daemon full ownership and
+		// hides the trusted-binary list from other local users.
+		mode = 0600
 	}
 
 	if err := os.Chmod(tmpPath, mode); err != nil {

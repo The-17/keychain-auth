@@ -60,9 +60,12 @@ if [ ! -f "$CONFIG_FILE" ]; then
   "trusted_signers": []
 }
 EOF
-  chown keychain-auth:keychain-auth "$CONFIG_FILE"
-  chmod 644 "$CONFIG_FILE"
 fi
+# The daemon owns and manages its trust store. It must be able to read AND write
+# it as its own user (so authorization is daemon-mediated and needs no sudo), and
+# it must not be world-readable. Enforce this on every install, not just the first.
+chown keychain-auth:keychain-auth "$CONFIG_FILE"
+chmod 600 "$CONFIG_FILE"
 
 # 5. Copy binary to /usr/local/bin
 if [ -f "./keychain-auth" ] && [ ! "./keychain-auth" -ef "/usr/local/bin/keychain-auth" ]; then

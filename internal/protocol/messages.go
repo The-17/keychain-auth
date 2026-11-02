@@ -12,10 +12,12 @@ const (
 type ActionType string
 
 const (
-	ActionRead   ActionType = "read"
-	ActionWrite  ActionType = "write"
-	ActionDelete ActionType = "delete"
-	ActionSearch ActionType = "search"
+	ActionRead      ActionType = "read"
+	ActionWrite     ActionType = "write"
+	ActionDelete    ActionType = "delete"
+	ActionSearch    ActionType = "search"
+	ActionCheck     ActionType = "check"
+	ActionAuthorize ActionType = "authorize"
 )
 
 // MatchType controls how targets are interpreted.

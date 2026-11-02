@@ -100,7 +100,12 @@ WantedBy=multi-user.target
 EOF
   systemctl daemon-reload
   systemctl enable keychain-auth.service || true
-  echo "Systemd service 'keychain-auth.service' installed and enabled."
+  # Start it now so the daemon is immediately available to mediate authorization
+  # (passwordless, as its own user) instead of leaving it for the next command
+  # to start. Failing to start here is non-fatal: the caller's EnsureDaemonRunning
+  # will start it, and the unit is enabled so it comes back after a reboot.
+  systemctl start keychain-auth.service || true
+  echo "Systemd service 'keychain-auth.service' installed, enabled, and started."
 fi
 
 echo "Installation complete!"

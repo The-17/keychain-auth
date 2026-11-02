@@ -4,8 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
+	"strconv"
 	"time"
+	"os/user"
 
 	"github.com/The-17/keychain-auth/internal/config"
 	"github.com/The-17/keychain-auth/internal/protocol"
@@ -81,9 +84,33 @@ var authorizeCmd = &cobra.Command{
 			return err
 		}
 
+		// The direct-write fallback can only reach the system store when invoked
+		// as root (e.g. `sudo keychain-auth authorize` with the daemon down). A
+		// root-owned store would strip the daemon's own write access and force the
+		// old sudo-every-time model, so restore daemon ownership and a
+		// non-world-readable mode whenever we are privileged enough to do so.
+		ensureStoreDaemonOwned(cfgPath)
+
 		fmt.Printf("Authorized %s for service %s\n", path, service)
 		return nil
 	},
+}
+
+// ensureStoreDaemonOwned best-effort restores the trust store to daemon
+// ownership and 0600. It is a no-op when not running as root (in which case the
+// direct write would already have failed), and it never widens permissions.
+func ensureStoreDaemonOwned(path string) {
+	u, err := user.Lookup("keychain-auth")
+	if err != nil {
+		u, err = user.Lookup("keychainauth")
+		if err != nil {
+			return
+		}
+	}
+	uid, _ := strconv.Atoi(u.Uid)
+	gid, _ := strconv.Atoi(u.Gid)
+	_ = os.Chown(path, uid, gid)
+	_ = os.Chmod(path, 0600)
 }
 
 // queryDaemonToAuthorize asks the running daemon to write the trust-store entry.

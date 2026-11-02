@@ -28,6 +28,35 @@ type Config struct {
 	RegisteredBinaries []RegisteredBinary `json:"registered_binaries"`
 	ProtocolVersion    string             `json:"protocol_version,omitempty"`
 	TrustedSigners     []TrustedSigner    `json:"trusted_signers,omitempty"`
+	// SupersededHashes records hashes that were replaced during a signed
+	// upgrade. Re-authorizing one of these is a rollback (replaying an older
+	// signed binary), so the daemon refuses it. This is a partial defence: it
+	// catches replay of a hash this installation actually ran, not a signed
+	// release that was never installed. Full rollback protection needs a signed
+	// version manifest.
+	SupersededHashes []string `json:"superseded_hashes,omitempty"`
+}
+
+// IsSuperseded reports whether hash was previously replaced by an upgrade.
+func (c *Config) IsSuperseded(hash string) bool {
+	if hash == "" {
+		return false
+	}
+	for _, h := range c.SupersededHashes {
+		if h == hash {
+			return true
+		}
+	}
+	return false
+}
+
+// Supersede records hash as replaced. It is a no-op for an empty hash or one
+// already recorded.
+func (c *Config) Supersede(hash string) {
+	if hash == "" || c.IsSuperseded(hash) {
+		return
+	}
+	c.SupersededHashes = append(c.SupersededHashes, hash)
 }
 
 // Load reads the config file from disk. If it doesn't exist, returns an empty config.

@@ -67,12 +67,15 @@ func (h *Handler) Handle(conn net.Conn) {
 		return
 	}
 
-	// 3. Compute file hash
-	fileHash, err := verify.HashBinary(osPath)
+	// 3. Read the binary once and hash those exact bytes. The hash and the
+	// signature check below use the same slice, so a file swapped between two
+	// separate reads cannot make the hash and the signature disagree (TOCTOU).
+	exeBytes, err := os.ReadFile(osPath)
 	if err != nil {
-		log.Printf("ERROR: failed to hash binary %s: %v", osPath, err)
+		log.Printf("ERROR: failed to read binary %s: %v", osPath, err)
 		return
 	}
+	fileHash := verify.HashBytes(exeBytes)
 
 	// 4. Live config reload per connection
 	cfg, err := config.Load(config.ConfigPath())
@@ -103,53 +106,20 @@ func (h *Handler) Handle(conn net.Conn) {
 			CanSearch: true,
 		}
 	} else if binaryPolicy == nil || binaryPolicy.Path != osPath {
-		// Code Signature Verification Check
-		var matchedSigner *config.TrustedSigner
-		for i := range cfg.TrustedSigners {
-			signer := &cfg.TrustedSigners[i]
-			ok, err := verify.VerifySignature(osPath, signer.PublicKey)
-			if err == nil && ok {
-				matchedSigner = signer
-				break
-			}
-		}
-
-		if matchedSigner != nil {
-			// Binary is signed by a trusted developer key!
-			// Auto-approve and auto-register/update the policy.
-			log.Printf("INFO: auto-approving connection for signed binary: %s", osPath)
-
-			// Find existing policy by path
-			var pathPolicy *config.RegisteredBinary
-			for i := range cfg.RegisteredBinaries {
-				if cfg.RegisteredBinaries[i].Path == osPath {
-					pathPolicy = &cfg.RegisteredBinaries[i]
-					break
-				}
-			}
-
-			if pathPolicy != nil {
-				// Update hash in memory
+		// A validly-signed binary may only REPLACE the hash of a path that is
+		// already registered (an upgrade). It must never create a new grant, be
+		// replayable to an older hash, or cross service namespaces. The signature
+		// is verified over exeBytes, the same slice the hash came from.
+		if pathPolicy, ok := h.signedUpgradeAllowed(cfg, exeBytes, osPath, fileHash); ok {
+			if pathPolicy.Hash != fileHash {
+				cfg.Supersede(pathPolicy.Hash)
 				pathPolicy.Hash = fileHash
-				binaryPolicy = pathPolicy
-			} else {
-				// Create new policy with access to the signed service
-				newPolicy := config.RegisteredBinary{
-					Path:                 osPath,
-					Hash:                 fileHash,
-					RegisteredAt:         time.Now().UTC().Format(time.RFC3339),
-					AllowedReadServices:  []string{matchedSigner.Service},
-					AllowedWriteServices: []string{matchedSigner.Service},
-					CanSearch:            true, // Allow search for its own service
+				pathPolicy.RegisteredAt = time.Now().UTC().Format(time.RFC3339)
+				if err := cfg.Save(config.ConfigPath()); err != nil {
+					log.Printf("ERROR: failed to save config after signed upgrade: %v", err)
 				}
-				cfg.RegisteredBinaries = append(cfg.RegisteredBinaries, newPolicy)
-				binaryPolicy = &cfg.RegisteredBinaries[len(cfg.RegisteredBinaries)-1]
 			}
-
-			// Save the updated configuration to disk
-			if err := cfg.Save(config.ConfigPath()); err != nil {
-				log.Printf("ERROR: failed to save config after signature auto-registration: %v", err)
-			}
+			binaryPolicy = pathPolicy
 		} else {
 			// Log unregistered attempt to pending.json
 			cmdLine, _ := h.verifier.ResolveCommandLine(pid)
@@ -713,6 +683,52 @@ func authorizePrivileged(peerUID uint32, peerUIDOK, systemStore bool, daemonUID 
 		return peerUID == 0
 	}
 	return int(peerUID) == daemonUID
+}
+
+// signedUpgradeAllowed decides whether a validly-signed binary may replace the
+// hash of an existing registered path. It returns the existing policy only when
+// every condition holds:
+//
+//   - the path is already registered (upgrade-only). A signature never creates a
+//     new grant, so a signed binary copied to a new path is not authorized.
+//   - the new hash has not been superseded before (no rollback/replay of an
+//     older signed binary).
+//   - a trusted signer's service is within the policy's allowed services (no
+//     cross-service privilege confusion: a binary signed for one namespace must
+//     not inherit another path's access).
+//
+// The caller passes the exact bytes that were hashed, so the signature is
+// verified over the same content as the hash (no TOCTOU between the two reads).
+func (h *Handler) signedUpgradeAllowed(
+	cfg *config.Config,
+	exeBytes []byte,
+	path, newHash string,
+) (*config.RegisteredBinary, bool) {
+	var pathPolicy *config.RegisteredBinary
+	for i := range cfg.RegisteredBinaries {
+		if cfg.RegisteredBinaries[i].Path == path {
+			pathPolicy = &cfg.RegisteredBinaries[i]
+			break
+		}
+	}
+	if pathPolicy == nil {
+		return nil, false // upgrade-only: never create a new grant
+	}
+	if cfg.IsSuperseded(newHash) {
+		return nil, false // rollback: refuse a hash that was already replaced
+	}
+	for i := range cfg.TrustedSigners {
+		signer := &cfg.TrustedSigners[i]
+		ok, err := verify.VerifySignatureBytes(exeBytes, signer.PublicKey)
+		if err != nil || !ok {
+			continue
+		}
+		if contains(pathPolicy.AllowedReadServices, signer.Service) ||
+			contains(pathPolicy.AllowedWriteServices, signer.Service) {
+			return pathPolicy, true
+		}
+	}
+	return nil, false
 }
 
 func isCLIBinary(binPath string) bool {

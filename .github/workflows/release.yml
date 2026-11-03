@@ -34,3 +34,16 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+      - name: Apply curated release notes
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          notes="changelog/${GITHUB_REF_NAME}.md"
+          if [ -f "$notes" ]; then
+            gh release edit "${GITHUB_REF_NAME}" --notes-file "$notes"
+            echo "Applied curated release notes from $notes"
+          else
+            echo "No curated notes at $notes; leaving GoReleaser's generated notes."
+          fi

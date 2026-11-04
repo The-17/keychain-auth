@@ -12,15 +12,17 @@ func ConfigPath() string {
 	if ConfigPathOverride != "" {
 		return ConfigPathOverride
 	}
-	// Prefer system config if it exists and is readable by the current process
-	sysFile := "/etc/keychain-auth/config.json"
-	if f, err := os.Open(sysFile); err == nil {
-		f.Close()
-		return sysFile
+	// A system install is identified by the PRESENCE of its store, not by whether
+	// this process may read it. The store is 0600 and daemon-owned, so an
+	// unprivileged CLI can stat it but cannot open it. Keying on readability made
+	// `status` and `doctor` fall back to the user path on a system install, report
+	// mode "user", and validate the wrong file's permissions.
+	if _, err := os.Stat(SystemConfigPath); err == nil {
+		return SystemConfigPath
 	}
 	if os.Getuid() == 0 {
-		if _, err := os.Stat("/etc/keychain-auth"); err == nil {
-			return sysFile
+		if _, err := os.Stat(filepath.Dir(SystemConfigPath)); err == nil {
+			return SystemConfigPath
 		}
 	}
 
@@ -74,7 +76,7 @@ func applyPermissions(tmpPath, targetPath string) error {
 		}
 	}
 
-	if targetPath == "/etc/keychain-auth/config.json" {
+	if targetPath == SystemConfigPath {
 		// The daemon owns its trust store and must be able to read AND write it
 		// as its own user (the installer chowns it keychain-auth:keychain-auth).
 		// It must not be world-readable. 0600 gives the daemon full ownership and

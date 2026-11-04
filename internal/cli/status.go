@@ -31,7 +31,7 @@ var statusCmd = &cobra.Command{
 		}
 
 		if runtime.GOOS == "linux" {
-			if info.ConfigPath == "/etc/keychain-auth/config.json" {
+			if info.ConfigPath == config.SystemConfigPath {
 				info.Mode = "system"
 				info.RequiresSudo = true
 			} else {

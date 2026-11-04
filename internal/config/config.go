@@ -10,6 +10,10 @@ import (
 
 var ConfigPathOverride string
 
+// SystemConfigPath is where a system-wide install keeps its trust store. It is a
+// var, not a const, so tests can point it at a fixture.
+var SystemConfigPath = "/etc/keychain-auth/config.json"
+
 type RegisteredBinary struct {
 	Path                 string   `json:"path"`
 	Hash                 string   `json:"hash"`
@@ -154,5 +158,5 @@ func PendingPath() string {
 // administrative actions (authorize) must come from root. On a user-mode store
 // the daemon runs as the user who owns it, and that user is the trust root.
 func IsSystemStore() bool {
-	return ConfigPath() == "/etc/keychain-auth/config.json"
+	return ConfigPath() == SystemConfigPath
 }

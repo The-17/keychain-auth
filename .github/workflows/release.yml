@@ -8,6 +8,8 @@ on:
 
 permissions:
   contents: write
+  # Keyless Sigstore signing exchanges this token for a short-lived certificate.
+  id-token: write
 
 jobs:
   goreleaser:
@@ -34,6 +36,25 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+      - name: Install cosign
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: sigstore/cosign-installer@v3
+
+      # Sign the checksum file, not each archive. The checksum file already
+      # binds every published archive, so one Keyless signature covers the
+      # whole release and gives verifiers a single artifact to check.
+      - name: Sign release checksums with Sigstore
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cosign sign-blob --yes \
+            --bundle dist/checksums.txt.sigstore.json \
+            dist/checksums.txt
+          gh release upload "${GITHUB_REF_NAME}" \
+            dist/checksums.txt.sigstore.json#checksums.txt.sigstore.json \
+            --clobber
 
       - name: Apply curated release notes
         if: startsWith(github.ref, 'refs/tags/v')

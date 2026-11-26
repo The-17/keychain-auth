@@ -3,6 +3,7 @@ package protocol_test
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -112,7 +113,7 @@ func TestWriteRequestAlignmentFields(t *testing.T) {
 }
 
 func TestOversizedMessage(t *testing.T) {
-	longMsg := `{"type": "` + strings.Repeat("a", 65536) + `"}` + "\n"
+	longMsg := `{"type": "` + strings.Repeat("a", protocol.MaxFrameSize) + `"}` + "\n"
 	dec := protocol.NewDecoder(strings.NewReader(longMsg))
 	_, err := dec.ReadRaw()
 	if err == nil {
@@ -120,5 +121,36 @@ func TestOversizedMessage(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "token too long") {
 		t.Errorf("Expected 'token too long' error, got: %v", err)
+	}
+}
+
+func TestLargeBatchRoundTrip(t *testing.T) {
+	const targets = 200
+	req := protocol.Request{
+		Type:    protocol.TypeRequest,
+		Action:  protocol.ActionWrite,
+		Service: "svc-test",
+		Targets: make([]string, 0, targets),
+		Values:  make([]string, 0, targets),
+	}
+	for i := 0; i < targets; i++ {
+		req.Targets = append(req.Targets, fmt.Sprintf("proj-%d:development:KEY_%d:policy", i, i))
+		req.Values = append(req.Values, strings.Repeat("p", 512))
+	}
+
+	var buf bytes.Buffer
+	if err := protocol.NewEncoder(&buf).Write(req); err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	raw, err := protocol.NewDecoder(&buf).ReadRaw()
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	var parsed protocol.Request
+	if err := protocol.UnmarshalRequest(raw, &parsed); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(parsed.Targets) != targets || len(parsed.Values) != targets {
+		t.Fatalf("got %d targets and %d values, want %d each", len(parsed.Targets), len(parsed.Values), targets)
 	}
 }

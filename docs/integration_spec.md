@@ -21,6 +21,7 @@ Instead of accessing native keychains directly (which lacks fine-grained applica
 *   **macOS / Linux:** Unix domain socket at `/var/run/keychain-auth/agent.sock` (Default permissions `0600`).
 *   **Windows:** Named pipe at `\\.\pipe\keychain-auth`.
 *   **Format:** Newline-delimited JSON. Every message is sent as a single JSON object terminated by a newline (`\n`).
+*   **Frame size:** A single message may be at most 10 MiB, including the newline. This limit applies to requests and responses. Batch writes with per-key policy blobs can approach it. Messages over the limit are rejected as malformed.
 
 ### Connection-Bound Authentication (Zero Session Tokens)
 `keychain-auth` does not use API keys or session tokens. **The connection itself is the authenticated session.**

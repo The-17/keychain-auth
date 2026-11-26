@@ -48,3 +48,7 @@ unaffected.
 
 An OV certificate reduces warnings. An EV certificate plus an established
 reputation is what builds SmartScreen trust. Neither is issued by Sigstore.
+
+Open-source projects can apply for sponsored signing at
+https://signpath.org/. That route provides signing at no cost and needs an
+application and approval before it can be wired into this release workflow.

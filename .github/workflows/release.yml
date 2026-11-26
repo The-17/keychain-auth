@@ -44,91 +44,20 @@ jobs:
       # Sign the checksum file, not each archive. The checksum file already
       # binds every published archive, so one Keyless signature covers the
       # whole release and gives verifiers a single artifact to check.
-      - name: Sign release checksums with Sigstore
+      - name: Sign release artifacts with Sigstore
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          cosign sign-blob --yes \
-            --bundle dist/checksums.txt.sigstore.json \
-            dist/checksums.txt
-          gh release upload "${GITHUB_REF_NAME}" \
-            dist/checksums.txt.sigstore.json#checksums.txt.sigstore.json \
-            --clobber
-
-  # Cosign proves provenance. Windows trust needs Authenticode, which is a
-  # different format. This job signs the Windows executable with osslsigncode
-  # using a code-signing certificate. It does nothing until the certificate
-  # secret is configured, so adding it cannot break an existing release.
-  authenticode:
-    name: Authenticode sign Windows binaries
-    needs: goreleaser
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      P12_B64: ${{ secrets.AUTHENTICODE_P12_BASE64 }}
-      P12_PASS: ${{ secrets.AUTHENTICODE_P12_PASSWORD }}
-    steps:
-      - name: Check for a signing certificate
-        id: cert
-        run: |
-          if [ -n "$P12_B64" ]; then
-            echo "available=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "available=false" >> "$GITHUB_OUTPUT"
-            echo "AUTHENTICODE_P12_BASE64 is not set; skipping Authenticode signing."
-          fi
-
-      - name: Install osslsigncode
-        if: steps.cert.outputs.available == 'true'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y osslsigncode
-
-      - name: Download Windows release archives
-        if: steps.cert.outputs.available == 'true'
-        run: |
-          mkdir -p release-assets
-          gh release download "${GITHUB_REF_NAME}" \
-            --repo The-17/keychain-auth \
-            --pattern 'keychain-auth_*_windows_*.tar.gz' \
-            --dir release-assets
-
-      - name: Sign and verify Windows executables
-        if: steps.cert.outputs.available == 'true'
-        run: |
           set -euo pipefail
-          printf '%s' "$P12_B64" | base64 -d > "$RUNNER_TEMP/cert.p12"
-          cd release-assets
-          for archive in keychain-auth_*_windows_*.tar.gz; do
-            work="$(mktemp -d)"
-            tar -xzf "$archive" -C "$work"
-            exe="$(find "$work" -type f -name keychain-auth.exe | head -n 1)"
-            if [ -z "$exe" ]; then
-              echo "no keychain-auth.exe in $archive" >&2
-              exit 1
-            fi
-            osslsigncode sign \
-              -pkcs12 "$RUNNER_TEMP/cert.p12" \
-              -pass "$P12_PASS" \
-              -n "keychain-auth" \
-              -i "https://agentsecrets.tech" \
-              -in "$exe" -out "$work/signed.exe"
-            osslsigncode verify -in "$work/signed.exe"
-            mv "$work/signed.exe" "$exe"
-            base="${archive%.tar.gz}"
-            tar -czf "${base}_signed.tar.gz" -C "$work" .
-            echo "signed: ${base}_signed.tar.gz"
+          for artifact in dist/checksums.txt dist/*.tar.gz; do
+            name="$(basename "$artifact")"
+            cosign sign-blob --yes \
+              --bundle "dist/${name}.sigstore.json" \
+              "$artifact"
           done
-          sha256sum keychain-auth_*_windows_*_signed.tar.gz > checksums-signed.txt
-
-      - name: Publish signed artifacts
-        if: steps.cert.outputs.available == 'true'
-        run: |
           gh release upload "${GITHUB_REF_NAME}" \
-            release-assets/keychain-auth_*_windows_*_signed.tar.gz \
-            release-assets/checksums-signed.txt \
+            dist/*.sigstore.json \
             --clobber
 
       - name: Apply curated release notes

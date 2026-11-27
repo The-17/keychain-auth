@@ -57,6 +57,9 @@ keychain-auth start
 | Command | Purpose |
 | --- | --- |
 | `keychain-auth start` | Start the daemon |
+| `keychain-auth ensure-running [--json]` | Start only if needed and report the dialable socket |
+| `keychain-auth restart [--json]` | Restart the daemon and report the dialable socket |
+| `keychain-auth self-update [--version X] [--json]` | Verify and install a signed release |
 | `keychain-auth status [--json]` | Show daemon health and configuration |
 | `keychain-auth identity [--json]` | Show this binary's hash, mode, socket, and protocol version |
 | `keychain-auth list-pending` | List binaries waiting for approval |
@@ -65,7 +68,9 @@ keychain-auth start
 | `keychain-auth upgrade <path>` | Update a registered binary's hash |
 | `keychain-auth check <path> <service>` | Check registration and authorization |
 
-`status --json` is the bootstrap view. Integrators should prefer the wire `status` action, which describes the daemon the client is actually talking to. `identity` lets a client verify the peer before sending secrets.
+`status --json` is the bootstrap view. Integrators should prefer the wire `status` action, which describes the daemon the client is actually talking to. `identity` lets a client verify the peer before sending secrets. `ensure-running` returns the socket to dial, so clients do not reimplement service detection.
+
+`self-update` verifies the downloaded archive against `checksums.txt` before replacing the binary. On Windows it writes `<binary>.new` because a running executable cannot be replaced in place.
 
 ---
 

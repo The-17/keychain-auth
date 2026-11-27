@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -27,7 +28,7 @@ type Daemon struct {
 }
 
 const (
-	maxConnections  = 64            // max concurrent connections
+	maxConnections  = 64 // max concurrent connections
 	shutdownTimeout = 5 * time.Second
 	readDeadline    = 30 * time.Second
 )
@@ -63,6 +64,11 @@ func (d *Daemon) Run() error {
 		l.Close()
 		return err
 	}
+
+	// The lifecycle commands use this PID to stop a supervised or detached
+	// daemon without scanning processes. It is best effort; an unprivileged
+	// daemon may not be able to write next to a root-owned socket.
+	_ = os.WriteFile(d.socketPath+".pid", []byte(strconv.Itoa(os.Getpid())), 0600)
 
 	log.Printf("keychain-auth daemon listening on %s\n", d.socketPath)
 
@@ -142,7 +148,8 @@ func (d *Daemon) Shutdown() error {
 		}
 	}
 
-	// Always clean up the socket file
+	// Always clean up the socket and pid files
+	_ = os.Remove(d.socketPath + ".pid")
 	if err := os.Remove(d.socketPath); err != nil && !os.IsNotExist(err) {
 		if firstErr == nil {
 			firstErr = err

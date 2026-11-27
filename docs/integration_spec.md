@@ -43,7 +43,7 @@ Clients initiate operations by sending a generalized `REQUEST` envelope.
 ```json
 {
   "type": "REQUEST",
-  "action": "read | write | delete | search",
+  "action": "read | write | delete | search | check | authorize | status",
   "service": "aws",
   "match": "exact | prefix",
   "targets": ["prod-api-key", "prod-db-password"],
@@ -58,8 +58,8 @@ Clients initiate operations by sending a generalized `REQUEST` envelope.
 | Field | Type | Description | Mandatory |
 | :--- | :--- | :--- | :--- |
 | `type` | String | Must be exactly `"REQUEST"`. | Yes |
-| `action` | String | Must be `"read"`, `"write"`, `"delete"`, `"search"`, or `"check"`. | Yes |
-| `service` | String | The service namespace (e.g. `aws`, `openai`, `github`). | Yes |
+| `action` | String | Must be `"read"`, `"write"`, `"delete"`, `"search"`, `"check"`, `"authorize"`, or `"status"`. | Yes |
+| `service` | String | The service namespace (e.g. `aws`, `openai`, `github`). Required for all actions except `status`. | Yes, except `status` |
 | `match` | String | Interpret targets: `"exact"` (default) or `"prefix"`. If `"prefix"`, targets are treated as prefix filters. (Not allowed for `"write"`). | Optional |
 | `targets` | Array of Strings | The key identifiers/accounts being acted upon. For `search` action, this is optional; if specified, they act as prefix filters. | Yes (except for `search`) |
 | `values` | Array of Strings | Values corresponding to `targets`. | Only for `write` action |
@@ -98,6 +98,27 @@ The daemon responds to all requests with a `RESPONSE` envelope.
 | `status` | String | `"success"`, `"denied"`, or `"error"`. |
 | `reason` | String | Set only when status is `"denied"` or `"error"`. |
 | `results` | Array of Objects | Key-value objects representing operation results. |
+| `registered` | Boolean | Status only. Whether the calling binary is registered. |
+| `hash_current` | Boolean | Status only. Whether the stored hash matches the running binary. |
+| `allowed_services` | Array of Strings | Status only. Service namespaces in the caller's policy. |
+| `daemon_version` | String | Status only. Version of the running daemon binary. |
+| `protocol_version` | String | Status only. Wire protocol version, currently `"1"`. |
+| `mode` | String | Status only. `"system"` or `"user"` store. |
+| `config_path` | String | Status only. Active trust-store path. |
+| `socket_path` | String | Status only. Socket the daemon listens on. |
+
+### 2.3 Status action
+
+`status` is read-only and needs no service namespace. It is answered before the
+registration denial, so an unregistered binary can learn why it was denied
+without reading the trust store. It never returns another client's policy.
+
+```json
+{"type":"REQUEST","action":"status"}
+```
+
+Older daemons answer unknown actions with `malformed_request`. Clients must
+treat that as "status unsupported" and fall back to local diagnostics.
 
 ---
 
@@ -116,6 +137,7 @@ All requested `targets` are checked against the binary's policy **before any key
 *   `delete`: Requires the requested `service` namespace to be listed in `allowed_write_services` (treated as a write-level privilege).
     *   *Note:* If `match` is set to `"prefix"`, the binary **must also** have `can_search: true` since the daemon needs to enumerate keys to resolve prefixes.
 *   `check`: Special check action to verify that a target binary path is registered and fully configured. Does not require specific read/write namespace scopes.
+*   `status`: Read-only self report. Available before registration and requires no namespace scope.
 
 ### 3.3 Search Blast-Radius & Prefix Filtering
 

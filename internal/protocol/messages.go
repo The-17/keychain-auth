@@ -1,5 +1,9 @@
 package protocol
 
+// Version is the protocol version reported by the daemon in a status response.
+// It is incremented only when the wire contract changes incompatibly.
+const Version = "1"
+
 // MessageType enumerates all valid protocol message types.
 type MessageType string
 
@@ -18,6 +22,10 @@ const (
 	ActionSearch    ActionType = "search"
 	ActionCheck     ActionType = "check"
 	ActionAuthorize ActionType = "authorize"
+	// ActionStatus is a read-only, pre-policy self report. An unregistered
+	// caller may ask it before the registration denial so it can diagnose its
+	// own state without reading the daemon's trust store.
+	ActionStatus ActionType = "status"
 )
 
 // MatchType controls how targets are interpreted.
@@ -60,12 +68,12 @@ type Envelope struct {
 // Request is the single, generalized structure sent by clients for any operation.
 // It supports batch processing via the Targets array.
 type Request struct {
-	Type       MessageType       `json:"type"`       // Must be "REQUEST"
-	Action     ActionType        `json:"action"`     // read, write, delete, search
-	Service    string            `json:"service"`    // OS keychain service namespace (e.g. "aws")
-	Match      MatchType         `json:"match,omitempty"` // "exact" (default) or "prefix"
-	Targets    []string          `json:"targets,omitempty"` // The keys/accounts being acted upon
-	Values     []string          `json:"values,omitempty"`  // Values to write (must align with Targets length)
+	Type       MessageType       `json:"type"`                 // Must be "REQUEST"
+	Action     ActionType        `json:"action"`               // read, write, delete, search
+	Service    string            `json:"service"`              // OS keychain service namespace (e.g. "aws")
+	Match      MatchType         `json:"match,omitempty"`      // "exact" (default) or "prefix"
+	Targets    []string          `json:"targets,omitempty"`    // The keys/accounts being acted upon
+	Values     []string          `json:"values,omitempty"`     // Values to write (must align with Targets length)
 	Attributes map[string]string `json:"attributes,omitempty"` // Metadata filters for searches or specific keys
 }
 
@@ -82,4 +90,15 @@ type Response struct {
 	Status  string       `json:"status"`           // "success", "denied", "error"
 	Reason  ReasonCode   `json:"reason,omitempty"` // Required if Status is not "success"
 	Results []ResultItem `json:"results,omitempty"`
+
+	// Status response fields. All omitempty so every existing response keeps
+	// its previous wire shape.
+	Registered      bool     `json:"registered,omitempty"`
+	HashCurrent     bool     `json:"hash_current,omitempty"`
+	AllowedServices []string `json:"allowed_services,omitempty"`
+	DaemonVersion   string   `json:"daemon_version,omitempty"`
+	ProtocolVersion string   `json:"protocol_version,omitempty"`
+	Mode            string   `json:"mode,omitempty"`
+	ConfigPath      string   `json:"config_path,omitempty"`
+	SocketPath      string   `json:"socket_path,omitempty"`
 }

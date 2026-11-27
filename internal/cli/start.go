@@ -45,6 +45,7 @@ var startCmd = &cobra.Command{
 		kcReader := keychain.New()
 
 		h := handler.New(verifier, kcReader, auditLog, pendingStore)
+		h.DaemonVersion = daemonVersion
 		d := daemon.New(sockPath, h)
 
 		return d.Run()

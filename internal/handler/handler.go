@@ -2,7 +2,6 @@ package handler
 
 import (
 	"errors"
-	"io"
 	"log"
 	"net"
 	"os"
@@ -21,10 +20,11 @@ import (
 const readDeadline = 30 * time.Second
 
 type Handler struct {
-	verifier verify.Verifier
-	keychain keychain.Keychain
-	audit    *audit.Logger
-	pending  *pending.PendingStore
+	verifier      verify.Verifier
+	keychain      keychain.Keychain
+	audit         *audit.Logger
+	pending       *pending.PendingStore
+	DaemonVersion string // set by start.go so status reports the running binary
 }
 
 func New(
@@ -39,6 +39,71 @@ func New(
 		audit:    auditLog,
 		pending:  pendingStore,
 	}
+}
+
+// writeStatus answers a read-only status request with facts about this daemon
+// and the calling peer. It is deliberately available before the registration
+// check, because a binary that most needs the answer is usually the one that
+// is not registered yet. The response contains no policy belonging to a
+// particular calling client.
+func (h *Handler) writeStatus(
+	enc *protocol.Encoder,
+	binPath, binHash string,
+	policy *config.RegisteredBinary,
+	registered bool,
+) {
+	allowed := make([]string, 0)
+	seen := make(map[string]bool)
+	if policy != nil {
+		for _, service := range append(append([]string{}, policy.AllowedReadServices...), policy.AllowedWriteServices...) {
+			if !seen[service] {
+				seen[service] = true
+				allowed = append(allowed, service)
+			}
+		}
+	}
+
+	mode := "user"
+	cfgPath := config.ConfigPath()
+	if config.IsSystemStore() {
+		mode = "system"
+	}
+
+	_ = enc.Write(protocol.Response{
+		Type:            protocol.TypeResponse,
+		Status:          "success",
+		Registered:      registered,
+		HashCurrent:     registered && policy != nil && strings.EqualFold(policy.Hash, binHash),
+		AllowedServices: allowed,
+		DaemonVersion:   h.DaemonVersion,
+		ProtocolVersion: protocol.Version,
+		Mode:            mode,
+		ConfigPath:      cfgPath,
+		SocketPath:      config.DefaultSocketPath(),
+	})
+}
+
+// readRequest reads one framed request, applying the read deadline on Unix
+// sockets. A nil return means the connection ended or the frame was invalid;
+// the caller must stop processing.
+func readRequest(dec *protocol.Decoder, enc *protocol.Encoder, conn net.Conn) *protocol.Request {
+	if tc, ok := conn.(*net.UnixConn); ok {
+		_ = tc.SetReadDeadline(time.Now().Add(readDeadline))
+	}
+	raw, err := dec.ReadRaw()
+	if err != nil {
+		return nil
+	}
+	var req protocol.Request
+	if err := protocol.UnmarshalRequest(raw, &req); err != nil {
+		_ = enc.Write(protocol.Response{
+			Type:   protocol.TypeResponse,
+			Status: "error",
+			Reason: protocol.ReasonMalformedRequest,
+		})
+		return nil
+	}
+	return &req
 }
 
 // Handle processes messages on a single connection until it closes or errors.
@@ -99,6 +164,25 @@ func (h *Handler) Handle(conn net.Conn) {
 
 	// 5. Look up binary hash in config
 	binaryPolicy := cfg.FindByHash(fileHash)
+	preRegistered := isCLIBinary(osPath) || (binaryPolicy != nil && binaryPolicy.Path == osPath)
+
+	// Answer read-only status requests before the registration decision. A binary
+	// that most needs to know its state is usually one that is not registered yet,
+	// and a system store is not readable by the caller.
+	var firstReq *protocol.Request
+	for {
+		req := readRequest(dec, enc, conn)
+		if req == nil {
+			return
+		}
+		if req.Type == protocol.TypeRequest && req.Action == protocol.ActionStatus {
+			h.writeStatus(enc, osPath, fileHash, binaryPolicy, preRegistered)
+			continue
+		}
+		firstReq = req
+		break
+	}
+
 	if isCLIBinary(osPath) {
 		binaryPolicy = &config.RegisteredBinary{
 			Path:      osPath,
@@ -156,31 +240,18 @@ func (h *Handler) Handle(conn net.Conn) {
 		Result:     "ACCEPTED",
 	})
 
+	// The first non-status request was read before the registration check.
+	if firstReq != nil {
+		h.processRequest(enc, firstReq, pid, peerUID, peerUIDOK, osPath, fileHash, binaryPolicy)
+	}
+
 	// Sequentially handle requests bound to this authenticated connection
 	for {
-		if tc, ok := conn.(*net.UnixConn); ok {
-			_ = tc.SetReadDeadline(time.Now().Add(readDeadline))
-		}
-
-		raw, err := dec.ReadRaw()
-		if err != nil {
-			if err == io.EOF {
-				return
-			}
+		req := readRequest(dec, enc, conn)
+		if req == nil {
 			return
 		}
-
-		var req protocol.Request
-		if err := protocol.UnmarshalRequest(raw, &req); err != nil {
-			_ = enc.Write(protocol.Response{
-				Type:   protocol.TypeResponse,
-				Status: "error",
-				Reason: protocol.ReasonMalformedRequest,
-			})
-			return
-		}
-
-		h.processRequest(enc, &req, pid, peerUID, peerUIDOK, osPath, fileHash, binaryPolicy)
+		h.processRequest(enc, req, pid, peerUID, peerUIDOK, osPath, fileHash, binaryPolicy)
 	}
 }
 
@@ -235,6 +306,9 @@ func (h *Handler) processRequest(
 
 	// Step 3: Policy authorization
 	switch req.Action {
+	case protocol.ActionStatus:
+		// Read-only self report. It reveals only the caller's own registration
+		// facts and the daemon's public configuration.
 	case protocol.ActionCheck:
 		if !isCLIBinary(binPath) {
 			h.writeDenied(enc, protocol.ReasonActionNotInPolicy, pid, binPath, binHash, req)
@@ -295,6 +369,9 @@ func (h *Handler) processRequest(
 	var results []protocol.ResultItem
 
 	switch req.Action {
+	case protocol.ActionStatus:
+		h.writeStatus(enc, binPath, binHash, policy, true)
+		return
 	case protocol.ActionAuthorize:
 		h.handleAuthorize(enc, req, pid, binPath, binHash)
 		return

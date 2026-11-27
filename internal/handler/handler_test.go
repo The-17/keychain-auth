@@ -220,7 +220,14 @@ func TestHandler_UnregisteredBinary(t *testing.T) {
 
 	go h.Handle(server)
 
-	// Try reading response directly after connection setup
+	// The registration verdict is now returned on the first real request, so
+	// an unregistered caller can ask for status first.
+	_ = sendJSON(client, protocol.Request{
+		Type:    protocol.TypeRequest,
+		Action:  protocol.ActionSearch,
+		Service: "svc-test",
+		Targets: []string{"x"},
+	})
 	var resp protocol.Response
 	if err := readJSON(client, &resp); err != nil {
 		t.Fatalf("Failed to read response: %v", err)
@@ -271,6 +278,12 @@ func TestHandler_PathMismatch(t *testing.T) {
 
 	go h.Handle(server)
 
+	_ = sendJSON(client, protocol.Request{
+		Type:    protocol.TypeRequest,
+		Action:  protocol.ActionSearch,
+		Service: "svc-test",
+		Targets: []string{"x"},
+	})
 	var resp protocol.Response
 	if err := readJSON(client, &resp); err != nil {
 		t.Fatalf("Failed to read response: %v", err)

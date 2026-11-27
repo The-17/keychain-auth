@@ -44,7 +44,8 @@ func New(
 // writeStatus answers a read-only status request with facts about this daemon
 // and the calling peer. It is deliberately available before the registration
 // check, because a binary that most needs the answer is usually the one that
-// is not registered yet. Nothing here is AgentSecrets-specific.
+// is not registered yet. The response contains no policy belonging to a
+// particular calling client.
 func (h *Handler) writeStatus(
 	enc *protocol.Encoder,
 	binPath, binHash string,

@@ -19,16 +19,16 @@ Verify an archive directly:
 
 ```bash
 cosign verify-blob \
-  --bundle keychain-auth_4.0.2_linux_amd64.tar.gz.sigstore.json \
+  --bundle keychain-auth_4.1.0_linux_amd64.tar.gz.sigstore.json \
   --certificate-identity-regexp '^https://github.com/The-17/keychain-auth/\.github/workflows/release\.yml@refs/tags/v.*$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  keychain-auth_4.0.2_linux_amd64.tar.gz
+  keychain-auth_4.1.0_linux_amd64.tar.gz
 ```
 
 Then check the archive against the signed checksum file:
 
 ```bash
-grep '  keychain-auth_4.0.2_linux_amd64.tar.gz$' checksums.txt | sha256sum -c -
+grep '  keychain-auth_4.1.0_linux_amd64.tar.gz$' checksums.txt | sha256sum -c -
 ```
 
 ## Scope
